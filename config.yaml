@@ -1,0 +1,22 @@
+# Global configuration
+model:
+  path: "best.pt"        # configurable model path (relative or absolute)
+  person_class_name: "person"
+  ppe_class_names: ["helmet","vest","mask"]  # class names for PPE in model; adjust to your model
+  confidence_threshold: 0.35
+  ppe_confidence_threshold: 0.25
+
+tracking:
+  iou_threshold: 0.3
+  max_missing_frames: 10
+  stable_frames: 5         # suppress detections until tracked for N frames
+
+camera:
+  default_fps: 5
+  min_box_area: 900       # ignore tiny boxes (pixels^2)
+  roi_enabled: false
+  roi: [0, 0, 1, 1]       # normalized x1,y1,x2,y2 (relative). Default: full frame
+
+fall_detection:
+  enabled: false
+  aspect_ratio_threshold: 0.5   # width/height threshold for simple fall heuristic

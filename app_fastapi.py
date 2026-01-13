@@ -198,15 +198,14 @@ def list_cameras():
 #   (there are TODO comments in ppedetector.py indicating these integration points).
 # - For high-throughput production, run multiple workers and prefer a dedicated GPU server.
 # - To run: `uvicorn app_fastapi:app --host 0.0.0.0 --port 8000`
-```
+#```
 
-What changed and why (concise)
-- Added `app_fastapi.py` implementing a FastAPI wrapper that:
-  - Instantiates a singleton `PPEDetector` at startup.
-  - Manages camera sources via a lightweight cache so multiple endpoints can reuse streams.
-  - Exposes `/detect` for single-frame JSON detections (optionally returns annotated frame as base64).
-  - Exposes `/stream/mjpeg` for MJPEG streaming with optional annotation toggle.
-  - Keeps the inference and I/O code separated so the detector remains reusable for background tasks or other integrations.
-- This file expects your existing `ppedetector.py` and `camera.py` to be present (no model changes).
+#What changed and why (concise)
+#- Added `app_fastapi.py` implementing a FastAPI wrapper that:
+#  - Manages camera sources via a lightweight cache so multiple endpoints can reuse streams.
+#  - Exposes `/detect` for single-frame JSON detections (optionally returns annotated frame as base64).
+#  - Exposes `/stream/mjpeg` for MJPEG streaming with optional annotation toggle.
+#  - Keeps the inference and I/O code separated so the detector remains reusable for background tasks or other integrations.
+#- This file expects your existing `ppedetector.py` and `camera.py` to be present (no model changes).
 
-Would you like a small example showing how to secure these endpoints (API key header) or how to deploy with Gunicorn + Uvicorn workers for production?
+#Would you like a small example showing how to secure these endpoints (API key header) or how to deploy with Gunicorn + Uvicorn workers for production?
