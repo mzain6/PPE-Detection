@@ -1,20 +1,31 @@
-#python app/services/detection_store.py
+
+"""
+DetectionStore: in-memory default, with optional Redis-backed implementation.
+Select Redis by setting environment variable REDIS_URL (e.g. redis://localhost:6379/0).
+"""
 from typing import Dict, Optional, Any
 import threading
 import time
 import copy
+import os
+import json
 import logging
 
 logger = logging.getLogger(__name__)
 
-class DetectionStore:
-    """
-    Thread-safe store for last detection per camera.
-    - mark_started(camera_id): indicates detection lifecycle started
-    - save(camera_id, detection): persist last detection (deep copy)
-    - get(camera_id): return deep copy of detection or None
-    - has_started(camera_id): whether detection has been started
-    """
+REDIS_URL = os.environ.get("REDIS_URL")
+
+# Attempt to import redis only if REDIS_URL provided
+_redis = None
+if REDIS_URL:
+    try:
+        import redis
+        _redis = redis
+    except Exception:
+        logger.warning("REDIS_URL provided but redis package not installed; falling back to in-memory store")
+        _redis = None
+
+class InMemoryDetectionStore:
     def __init__(self):
         self._lock = threading.RLock()
         self._store: Dict[str, Dict[str, Any]] = {}
@@ -42,5 +53,60 @@ class DetectionStore:
         with self._lock:
             return camera_id in self._started
 
-# singleton instance
-detection_store = DetectionStore()
+class RedisDetectionStore:
+    def __init__(self, url: str):
+        # redis.StrictRedis is thread-safe for our usage
+        self._client = _redis.from_url(url, decode_responses=True)
+        # keys:
+        # detection:{camera_id} -> JSON string
+        # detection_started:{camera_id} -> timestamp
+        self._prefix_det = "detection:"
+        self._prefix_started = "detection_started:"
+
+    def mark_started(self, camera_id: str) -> None:
+        key = self._prefix_started + camera_id
+        try:
+            # use setnx to preserve first start time
+            now = str(time.time())
+            self._client.setnx(key, now)
+            logger.info("Redis mark_started for %s", camera_id)
+        except Exception:
+            logger.exception("Redis mark_started failed for %s", camera_id)
+
+    def save(self, camera_id: str, detection: Dict[str, Any]) -> None:
+        key = self._prefix_det + camera_id
+        try:
+            data = json.dumps(detection)
+            self._client.set(key, data)
+            # ensure started flag exists
+            self.mark_started(camera_id)
+            logger.debug("Redis saved detection for %s", camera_id)
+        except Exception:
+            logger.exception("Redis save failed for %s", camera_id)
+
+    def get(self, camera_id: str) -> Optional[Dict[str, Any]]:
+        key = self._prefix_det + camera_id
+        try:
+            data = self._client.get(key)
+            if data is None:
+                return None
+            return json.loads(data)
+        except Exception:
+            logger.exception("Redis get failed for %s", camera_id)
+            return None
+
+    def has_started(self, camera_id: str) -> bool:
+        key = self._prefix_started + camera_id
+        try:
+            return self._client.exists(key) == 1
+        except Exception:
+            logger.exception("Redis has_started failed for %s", camera_id)
+            return False
+
+# factory: choose redis-backed store if available, else in-memory
+if REDIS_URL and _redis is not None:
+    detection_store = RedisDetectionStore(REDIS_URL)
+    logger.info("Using RedisDetectionStore with %s", REDIS_URL)
+else:
+    detection_store = InMemoryDetectionStore()
+    logger.info("Using InMemoryDetectionStore")
