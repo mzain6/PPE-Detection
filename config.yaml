@@ -1,0 +1,43 @@
+# Global configuration for PPE Detection System
+
+model:
+  path: "best.pt"  # Custom trained PPE model for helmet and vest detection
+  input_size: 320  # Reduced for better CPU performance (was 640)
+  device: "auto"  # "cpu", "cuda", or "auto" - auto will use GPU if available
+  conf_threshold: 0.25  # Confidence threshold for detections
+  iou_threshold: 0.45  # NMS IoU threshold
+  
+  # Class IDs for custom PPE model
+  # Note: These match the actual model class IDs
+  classes:
+    person: 14
+    helmet: 12  # head_helmet in model
+    vest: 16
+
+tracking:
+  iou_threshold: 0.5  # Increased from 0.3 - higher = more strict matching, prevents ID switching
+  max_lost_seconds: 0.1  # Nearly immediate removal when detection lost (reduced from 1.0)
+
+camera:
+  reconnect:
+    initial_delay: 2.0
+    max_delay: 30.0
+    backoff_factor: 2.0  # delay * factor each attempt
+    max_retries: 0       # 0 = infinite retries
+  
+  default_fps: 15
+  ffmpeg_transport: "tcp"  # "tcp" or "udp" (TCP recommended for RTSP reliability)
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  cors_origins: ["*"]  # Restrict this in production!
+
+logging:
+  level: "INFO"
+
+alerts:
+  enabled: true
+  violation_threshold_seconds: 10.0
+  alert_endpoint: "http://localhost:8000/api/ppe-alert"
+
