@@ -1,6 +1,8 @@
 """
-PPE Detection on Video File - Construction Safety Video
-Outputs annotated video with person IDs, helmet, and vest detection
+PPE Detection with IMPROVED Face ID Stability
+- Lower threshold for better matching
+- Temporal smoothing - requires multiple frames to change ID
+- Embedding averaging for stability
 """
 import cv2
 import numpy as np
@@ -8,25 +10,8 @@ from ultralytics import YOLO
 import time
 import torch
 from collections import defaultdict
-import os
 
-# Video paths
-INPUT_VIDEO = r"C:\Users\ST\Desktop\PPE_Phas2_05Feb\Phase_Detection_05Feb\PPE-Detection-2\Construction Safety at Mortenson_ Hard Hats to Helmets on the Jobsite.mp4"
-OUTPUT_VIDEO = r"C:\Users\ST\Desktop\PPE_Phas2_05Feb\Phase_Detection_05Feb\PPE-Detection-2\ppe_detection_output.mp4"
-
-print("=" * 60)
-print("PPE Detection on Video")
-print("=" * 60)
-
-# Check input exists
-if not os.path.exists(INPUT_VIDEO):
-    print(f"ERROR: Input video not found: {INPUT_VIDEO}")
-    exit(1)
-
-print(f"\nInput: {INPUT_VIDEO}")
-print(f"Output: {OUTPUT_VIDEO}")
-
-print("\nLoading models...")
+print("Loading YOLO models...")
 person_model = YOLO("yolov8n.pt")
 face_model = YOLO("yolov8m-face-lindevs.pt")
 ppe_model = YOLO("best.pt")
@@ -46,29 +31,40 @@ except Exception as e:
 
 class StableFaceTracker:
     def __init__(self):
-        self.known_faces = {}
+        # Face database
+        self.known_faces = {}  # id -> {"emb": averaged embedding, "count": times seen}
         self.next_id = 1
-        self.match_threshold = 0.55
-        self.person_current_id = {}
-        self.person_candidates = defaultdict(list)
-        self.stability_frames = 5
-        self.positions = {}
+        
+        # TUNING PARAMETERS
+        self.match_threshold = 0.55  # LOWER = more lenient matching (was 0.7)
+        self.new_face_threshold = 0.45  # Must be very different to be new face
+        
+        # Temporal smoothing
+        self.person_current_id = {}  # track_key -> current stable ID
+        self.person_candidates = defaultdict(list)  # track_key -> list of recent candidate IDs
+        self.stability_frames = 5  # Need 5 consistent frames to change ID
+        
+        # Position tracking
+        self.positions = {}  # (cx,cy) -> (id, timestamp)
         
     def get_id(self, face_img, bbox, timestamp):
         x1, y1, x2, y2 = bbox
         cx, cy = (x1+x2)//2, (y1+y2)//2
-        track_key = f"{cx//50}_{cy//50}"
+        track_key = f"{cx//50}_{cy//50}"  # Grid-based tracking key
         
         candidate_id = None
         
+        # Try face matching first
         if FACENET_OK and face_img is not None and face_img.size > 500:
             emb = self._get_embedding(face_img)
             if emb is not None:
                 candidate_id = self._match_face(emb)
         
+        # Fallback to position if no face match
         if candidate_id is None:
             candidate_id = self._from_position(cx, cy, timestamp)
         
+        # If still no match, assign new ID
         if candidate_id is None:
             candidate_id = self.next_id
             self.next_id += 1
@@ -76,8 +72,12 @@ class StableFaceTracker:
                 emb = self._get_embedding(face_img)
                 if emb is not None:
                     self.known_faces[candidate_id] = {"emb": emb, "count": 1}
+                    print(f"[NEW FACE] ID {candidate_id}")
         
+        # TEMPORAL SMOOTHING - don't change ID immediately
         stable_id = self._apply_temporal_smoothing(track_key, candidate_id)
+        
+        # Update position
         self._update_position(cx, cy, stable_id, timestamp)
         
         return stable_id
@@ -86,13 +86,17 @@ class StableFaceTracker:
         try:
             if face_img.shape[0] < 30 or face_img.shape[1] < 30:
                 return None
+            
             face_resized = cv2.resize(face_img, (160, 160))
             face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
+            
             face_tensor = torch.from_numpy(face_rgb).permute(2, 0, 1).float()
             face_tensor = (face_tensor - 127.5) / 128.0
             face_tensor = face_tensor.unsqueeze(0).to(device)
+            
             with torch.no_grad():
                 emb = face_encoder(face_tensor)
+            
             return emb.cpu().numpy().flatten()
         except:
             return None
@@ -100,57 +104,85 @@ class StableFaceTracker:
     def _match_face(self, emb):
         best_id = None
         best_sim = self.match_threshold
+        
         for fid, data in self.known_faces.items():
             stored_emb = data["emb"]
+            # Cosine similarity
             sim = np.dot(emb, stored_emb) / (np.linalg.norm(emb) * np.linalg.norm(stored_emb) + 1e-8)
+            
             if sim > best_sim:
                 best_sim = sim
                 best_id = fid
+        
         if best_id is not None:
+            # Update embedding with running average for stability
             old_emb = self.known_faces[best_id]["emb"]
             count = self.known_faces[best_id]["count"]
+            # Weighted average - gives more weight to established embedding
             alpha = min(0.1, 1.0 / (count + 1))
             new_emb = (1 - alpha) * old_emb + alpha * emb
-            self.known_faces[best_id]["emb"] = new_emb / (np.linalg.norm(new_emb) + 1e-8)
+            self.known_faces[best_id]["emb"] = new_emb / (np.linalg.norm(new_emb) + 1e-8)  # Normalize
             self.known_faces[best_id]["count"] = count + 1
+        
         return best_id
     
     def _apply_temporal_smoothing(self, track_key, candidate_id):
+        """Require consistent ID for several frames before changing"""
+        
+        # Get current stable ID
         current_id = self.person_current_id.get(track_key)
+        
         if current_id is None:
+            # First time seeing this position - accept candidate
             self.person_current_id[track_key] = candidate_id
             self.person_candidates[track_key] = [candidate_id]
             return candidate_id
+        
         if candidate_id == current_id:
+            # Same as current - reset candidates, stay stable
             self.person_candidates[track_key] = [candidate_id]
             return current_id
+        
+        # Different ID - add to candidates
         self.person_candidates[track_key].append(candidate_id)
+        
+        # Keep only recent candidates
         if len(self.person_candidates[track_key]) > self.stability_frames * 2:
             self.person_candidates[track_key] = self.person_candidates[track_key][-self.stability_frames * 2:]
+        
+        # Count how many recent frames have this candidate
         recent = self.person_candidates[track_key][-self.stability_frames:]
         if len(recent) >= self.stability_frames and all(c == candidate_id for c in recent):
+            # Consistent for N frames - switch ID
             self.person_current_id[track_key] = candidate_id
             self.person_candidates[track_key] = [candidate_id]
+            print(f"[ID SWITCH] {current_id} -> {candidate_id}")
             return candidate_id
+        
+        # Not stable enough - keep current ID
         return current_id
     
     def _from_position(self, cx, cy, timestamp):
         best_id = None
         best_dist = 100
+        
         to_del = []
         for (px, py), (pid, ts) in self.positions.items():
-            if timestamp - ts > 3:
+            if timestamp - ts > 3:  # 3 sec timeout
                 to_del.append((px, py))
                 continue
             dist = ((cx-px)**2 + (cy-py)**2)**0.5
             if dist < best_dist:
                 best_dist = dist
                 best_id = pid
+        
         for k in to_del:
             del self.positions[k]
+        
         return best_id
     
     def _update_position(self, cx, cy, pid, ts):
+        # Remove old positions for this ID
         to_del = [k for k, (fid, _) in self.positions.items() if fid == pid]
         for k in to_del:
             del self.positions[k]
@@ -158,45 +190,26 @@ class StableFaceTracker:
 
 tracker = StableFaceTracker()
 
-# Open video
-cap = cv2.VideoCapture(INPUT_VIDEO)
+cap = cv2.VideoCapture(0)
 if not cap.isOpened():
-    print("ERROR: Cannot open video!")
+    print("ERROR: Cannot open webcam!")
     exit(1)
 
-# Get video properties
-fps = int(cap.get(cv2.CAP_PROP_FPS))
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-print(f"\nVideo: {width}x{height} @ {fps}fps, {total_frames} frames")
-
-# Setup output video
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (width, height))
-
-print(f"\nProcessing video...")
+print("\n✓ Ready! Press 'q' to quit")
+print("ID changes require 5 consistent frames for stability\n")
 
 frame_n = 0
-start_time = time.time()
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
     
-    frame_n += 1
     h, w = frame.shape[:2]
     ts = time.time()
+    frame_n += 1
     
-    # Progress
-    if frame_n % 30 == 0:
-        elapsed = time.time() - start_time
-        fps_actual = frame_n / elapsed
-        eta = (total_frames - frame_n) / fps_actual if fps_actual > 0 else 0
-        print(f"  Frame {frame_n}/{total_frames} ({100*frame_n/total_frames:.1f}%) - {fps_actual:.1f} fps - ETA: {eta:.0f}s")
-    
+    # Face detection every 3 frames for better tracking
     do_face = (frame_n % 3 == 0) or (frame_n < 20)
     
     # 1. Detect persons
@@ -213,7 +226,7 @@ while True:
                 "hbox": None, "vbox": None, "id": None
             })
     
-    # 2. Face detection + ID
+    # 2. Face detection + Stable ID
     for p in persons:
         x1, y1, x2, y2 = p["bbox"]
         x1, y1 = max(0, x1), max(0, y1)
@@ -252,25 +265,24 @@ while True:
                     p["vest"] = True
                     p["vbox"] = fbox
     
-    # 4. Draw
+    # 4. DRAW
     for p in persons:
         x1, y1, x2, y2 = p["bbox"]
         pid = p["id"]
         ph = y2 - y1
         pw = x2 - x1
         
-        # Person box always green
-        col = (0, 255, 0)
+        # Person box is always GREEN when person detected with ID
+        col = (0, 255, 0)  # Green for detected person
+        
         cv2.rectangle(frame, (x1, y1), (x2, y2), col, 3)
         
-        # ID label
         id_txt = f"ID {pid}" if pid else "ID ?"
         (tw, th), _ = cv2.getTextSize(id_txt, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
         cv2.rectangle(frame, (x1, y1), (x1 + tw + 20, y1 + th + 20), col, -1)
         cv2.putText(frame, id_txt, (x1 + 10, y1 + th + 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
         
-        # Helmet
         if p["helmet"] and p["hbox"]:
             hx1, hy1, hx2, hy2 = p["hbox"]
             cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (0, 255, 0), 2)
@@ -280,7 +292,6 @@ while True:
             cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (0, 0, 255), 2)
             cv2.putText(frame, "NO HELMET", (hx1, hy1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
         
-        # Vest
         if p["vest"] and p["vbox"]:
             vx1, vy1, vx2, vy2 = p["vbox"]
             cv2.rectangle(frame, (vx1, vy1), (vx2, vy2), (0, 255, 0), 2)
@@ -290,18 +301,13 @@ while True:
             cv2.rectangle(frame, (vx1, vy1), (vx2, vy2), (0, 0, 255), 2)
             cv2.putText(frame, "NO VEST", (vx1, vy1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
     
-    # Info overlay
-    info = f"Persons: {len(persons)} | Known Faces: {len(tracker.known_faces)}"
-    cv2.putText(frame, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    info = f"Persons: {len(persons)} | Known: {len(tracker.known_faces)} | 'q' to quit"
+    cv2.putText(frame, info, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
     
-    # Write frame
-    out.write(frame)
+    cv2.imshow("PPE Detection", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
 cap.release()
-out.release()
-
-elapsed = time.time() - start_time
-print(f"\n✓ Processing complete!")
-print(f"  Processed {frame_n} frames in {elapsed:.1f}s ({frame_n/elapsed:.1f} fps)")
-print(f"  Output saved to: {OUTPUT_VIDEO}")
-print(f"  Total unique persons: {len(tracker.known_faces)}")
+cv2.destroyAllWindows()
+print("Done!")

@@ -145,3 +145,147 @@ def optimize_for_inference():
             logger.info("Enabled cuDNN benchmarking for inference optimization")
     except Exception as e:
         logger.error(f"Error applying inference optimizations: {e}")
+
+
+def get_gpu_utilization(device_id: int = 0) -> float:
+    """
+    Get GPU compute utilization percentage.
+    
+    Args:
+        device_id: GPU device ID
+    
+    Returns:
+        Utilization percentage (0-100), or 0 if unavailable
+    """
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+        utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        pynvml.nvmlShutdown()
+        return float(utilization.gpu)
+    except ImportError:
+        logger.debug("pynvml not available, GPU utilization unavailable")
+        return 0.0
+    except Exception as e:
+        logger.debug(f"Error getting GPU utilization: {e}")
+        return 0.0
+
+
+def estimate_model_memory_mb(model_path: str) -> float:
+    """
+    Estimate memory usage of a model file.
+    
+    Args:
+        model_path: Path to model weights file
+    
+    Returns:
+        Estimated memory in MB
+    """
+    import os
+    try:
+        if os.path.exists(model_path):
+            file_size_mb = os.path.getsize(model_path) / (1024 * 1024)
+            # Model in memory is typically 2-3x the file size (weights + activations + gradients)
+            # For inference only, estimate 2.5x
+            estimated_mb = file_size_mb * 2.5
+            logger.debug(f"Model {model_path}: {file_size_mb:.1f}MB file, estimated {estimated_mb:.1f}MB in memory")
+            return estimated_mb
+        else:
+            logger.warning(f"Model file not found: {model_path}")
+            return 0.0
+    except Exception as e:
+        logger.error(f"Error estimating model memory: {e}")
+        return 0.0
+
+
+def calculate_max_model_instances(model_path: str, device_id: int = 0, reserved_gb: float = 0.5) -> int:
+    """
+    Calculate maximum number of model instances that can fit in GPU memory.
+    
+    Args:
+        model_path: Path to model weights
+        device_id: GPU device ID
+        reserved_gb: Amount of VRAM to keep free (GB)
+    
+    Returns:
+        Maximum number of instances, or -1 if GPU unavailable
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            logger.info("GPU not available, unlimited CPU instances")
+            return -1  # Unlimited for CPU
+        
+        mem_info = get_gpu_memory_info(device_id)
+        total_gb = mem_info.get("total_gb", 0)
+        
+        if total_gb == 0:
+            return -1
+        
+        # Calculate available memory
+        available_gb = total_gb - reserved_gb
+        
+        # Estimate model memory
+        model_memory_mb = estimate_model_memory_mb(model_path)
+        model_memory_gb = model_memory_mb / 1024
+        
+        if model_memory_gb == 0:
+            logger.warning("Could not estimate model memory, defaulting to 1 instance")
+            return 1
+        
+        # Calculate max instances
+        max_instances = int(available_gb / model_memory_gb)
+        max_instances = max(1, max_instances)  # At least 1
+        
+        logger.info(f"GPU memory: {total_gb:.2f}GB total, {available_gb:.2f}GB available")
+        logger.info(f"Model memory: {model_memory_gb:.2f}GB per instance")
+        logger.info(f"Max instances: {max_instances}")
+        
+        return max_instances
+        
+    except Exception as e:
+        logger.error(f"Error calculating max instances: {e}")
+        return 1  # Safe default
+
+
+class GPUMemoryMonitor:
+    """
+    Context manager for monitoring GPU memory usage during operations.
+    
+    Usage:
+        with GPUMemoryMonitor(device_id=0) as monitor:
+            # Your GPU operation
+            model.load()
+        
+        print(f"Memory used: {monitor.memory_used_mb}MB")
+    """
+    
+    def __init__(self, device_id: int = 0, name: str = "Operation"):
+        self.device_id = device_id
+        self.name = name
+        self.memory_before = 0.0
+        self.memory_after = 0.0
+        self.memory_used_mb = 0.0
+    
+    def __enter__(self):
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self.device_id)
+                self.memory_before = torch.cuda.memory_allocated(self.device_id) / (1024 * 1024)
+        except Exception as e:
+            logger.debug(f"Error in GPUMemoryMonitor enter: {e}")
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self.device_id)
+                self.memory_after = torch.cuda.memory_allocated(self.device_id) / (1024 * 1024)
+                self.memory_used_mb = self.memory_after - self.memory_before
+                logger.info(f"{self.name}: Used {self.memory_used_mb:.1f}MB GPU memory")
+        except Exception as e:
+            logger.debug(f"Error in GPUMemoryMonitor exit: {e}")
+        return False

@@ -49,6 +49,25 @@ class Settings:
     alerts_enabled: bool = True
     violation_threshold_seconds: float = 10.0
     alert_endpoint: str = "http://localhost:8000/api/ppe-alert"
+    
+    # GPU optimization settings
+    batch_enabled: bool = True
+    batch_size: int = 8
+    batch_timeout_ms: int = 100
+    gpu_memory_threshold_gb: float = 0.5  # Reserve this much VRAM
+    max_model_instances: int = -1  # -1 = auto-calculate
+    
+    # Face detection settings
+    face_detection_enabled: bool = True
+    face_model_path: str = "yolov8m-face-lindevs.pt"
+    face_confidence_threshold: float = 0.5
+    face_min_size: int = 30
+    
+    # Face tracking settings
+    face_similarity_threshold: float = 0.6
+    face_max_age_seconds: float = 300.0
+    face_min_stable_frames: int = 3
+    face_reidentification_enabled: bool = True
 
     def __init__(self, config_path: str = None):
         if config_path:
@@ -94,6 +113,31 @@ class Settings:
         self.alerts_enabled = alerts_cfg.get("enabled", self.alerts_enabled)
         self.violation_threshold_seconds = alerts_cfg.get("violation_threshold_seconds", self.violation_threshold_seconds)
         self.alert_endpoint = alerts_cfg.get("alert_endpoint", self.alert_endpoint)
+        
+        # Load GPU optimization settings
+        mc = data.get("multi_camera", {})
+        batch_cfg = mc.get("batch_inference", {})
+        self.batch_enabled = batch_cfg.get("enabled", self.batch_enabled)
+        self.batch_size = batch_cfg.get("batch_size", self.batch_size)
+        self.batch_timeout_ms = batch_cfg.get("timeout_ms", self.batch_timeout_ms)
+        
+        gpu_cfg = mc.get("gpu", {})
+        self.gpu_memory_threshold_gb = gpu_cfg.get("memory_threshold_gb", self.gpu_memory_threshold_gb)
+        self.max_model_instances = gpu_cfg.get("max_instances", self.max_model_instances)
+        
+        # Load face detection settings
+        face_det = data.get("face_detection", {})
+        self.face_detection_enabled = face_det.get("enabled", self.face_detection_enabled)
+        self.face_model_path = face_det.get("model_path", self.face_model_path)
+        self.face_confidence_threshold = face_det.get("confidence_threshold", self.face_confidence_threshold)
+        self.face_min_size = face_det.get("min_face_size", self.face_min_size)
+        
+        # Load face tracking settings
+        face_track = data.get("face_tracking", {})
+        self.face_similarity_threshold = face_track.get("similarity_threshold", self.face_similarity_threshold)
+        self.face_max_age_seconds = face_track.get("max_face_age_seconds", self.face_max_age_seconds)
+        self.face_min_stable_frames = face_track.get("min_stable_frames", self.face_min_stable_frames)
+        self.face_reidentification_enabled = face_track.get("reidentification_enabled", self.face_reidentification_enabled)
 
 # single shared settings instance
 settings = Settings()

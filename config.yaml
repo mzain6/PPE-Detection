@@ -1,7 +1,7 @@
 # Global configuration for PPE Detection System
 
 model:
-  path: "best.pt"  # Custom trained PPE model for helmet and vest detection
+  path: "yolov8n.pt"  # Using standard YOLO with person class (class 0)
   input_size: 320  # Reduced for better CPU performance (was 640)
   device: "auto"  # "cpu", "cuda", or "auto" - auto will use GPU if available
   conf_threshold: 0.25  # Confidence threshold for detections
@@ -41,3 +41,37 @@ alerts:
   violation_threshold_seconds: 10.0
   alert_endpoint: "http://localhost:8000/api/ppe-alert"
 
+# Multi-camera settings for parallel processing
+multi_camera:
+  max_cameras: 10
+  frame_queue_size: 5
+  reconnect_delay: 3.0
+  
+  # Batch inference settings (for GPU optimization)
+  batch_inference:
+    enabled: false  # DISABLED - using direct detection instead
+    batch_size: 8
+    timeout_ms: 100  # Max wait time to fill batch
+  
+  # GPU memory management
+  gpu:
+    memory_threshold_gb: 0.5  # Reserve 0.5GB VRAM
+    max_instances: -1  # -1 = auto-calculate based on available VRAM
+  
+  # Performance monitoring
+  monitoring:
+    fps_update_interval: 1.0  # seconds
+    metrics_log_interval: 10.0  # seconds
+
+# Face detection and re-identification
+face_detection:
+  enabled: true
+  model_path: "yolov8m-face-lindevs.pt"
+  confidence_threshold: 0.5
+  min_face_size: 30  # Minimum face size in pixels
+  
+face_tracking:
+  similarity_threshold: 0.6  # Lower = stricter face matching
+  max_face_age_seconds: 300  # Remember faces for 5 minutes
+  min_stable_frames: 3  # Frames before ID considered stable
+  reidentification_enabled: true
