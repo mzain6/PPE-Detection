@@ -11,11 +11,12 @@ from collections import deque, Counter
 # Add as many cameras as you want. 
 # You can mix different IPs (DVRs), Users, and Passwords.
 CAM_CONFIG = [
-    # DVR 1 (Found IP)
-    {"id": "Cam 1", "url": "rtsp://admin:admin@2021@192.168.100.49:554/cam/realmonitor?channel=1&subtype=1"},
-    {"id": "Cam 2", "url": "rtsp://admin:admin@2021@192.168.100.49:554/cam/realmonitor?channel=2&subtype=1"},
-    {"id": "Cam 3", "url": "rtsp://admin:admin@2021@192.168.100.49:554/cam/realmonitor?channel=3&subtype=1"},
-    {"id": "Cam 4", "url": "rtsp://admin:admin@2021@192.168.100.49:554/cam/realmonitor?channel=4&subtype=1"},
+    # DVR (User's System) - Running 1 camera for CPU performance
+    {"id": "Cam 1", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=1&subtype=1"},
+    # Commented out for CPU performance (uncomment if you have GPU)
+     {"id": "Cam 2", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=5&subtype=1"},
+    # {"id": "Cam 3", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=3&subtype=1"},
+    # {"id": "Cam 4", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=4&subtype=1"},
     
     # EXAMPLE: Local Webcam
     # {"id": "My Webcam", "url": 0}, 
@@ -25,8 +26,8 @@ CAM_CONFIG = [
 ]
 
 # Paths
-HELMET_MODEL_PATH = r"C:\Users\hashi\Downloads\PPE-Detection-2\PPE-Detection-2\best1.pt"
-VEST_MODEL_PATH = r"C:\Users\hashi\Downloads\PPE-Detection-2\PPE-Detection-2\self.pt"
+HELMET_MODEL_PATH = r"C:\Users\Mzain\OneDrive\Desktop\Syed-PPE\best1.pt"
+VEST_MODEL_PATH = r"C:\Users\Mzain\OneDrive\Desktop\Syed-PPE\self.pt"
 
 # Settings
 BASE_CONF = 0.10
