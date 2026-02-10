@@ -17,10 +17,10 @@ from central_tracking_manager import CentralTrackingManager
 
 # --- CONFIGURATION ---
 CAM_CONFIG = [
-    # Cam 1: Entrance camera with face recognition (WEBCAM FOR TESTING)
+    # Cam 1: Entrance camera with face recognition (WEBCAM)
     {"id": "Cam 1", "url": 0, "is_entrance": True},
-    # Cam 2: Temporarily disabled for testing
-    # {"id": "Cam 2", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=2&subtype=1", "is_entrance": False},
+    # Cam 2: Disabled for testing
+    # {"id": "Cam 2", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=5&subtype=1", "is_entrance": False},
 ]
 
 # Paths
@@ -38,7 +38,7 @@ SMOOTHING_FACTOR = 0.4
 
 # Face recognition settings
 FACE_CHECK_INTERVAL = 5  # Check for new faces every N frames
-FACE_SIMILARITY_THRESHOLD = 0.5  # Lower threshold = more lenient matching
+FACE_SIMILARITY_THRESHOLD = 0.3  # Lower threshold = more lenient matching
 
 # Class-Specific Logic
 TARGET_CLASSES = {
@@ -127,6 +127,10 @@ def main():
     print("Loading PPE detection models...")
     model_helmet = YOLO(HELMET_MODEL_PATH)
     model_vest = YOLO(VEST_MODEL_PATH)
+    
+    # Load standard YOLO for person detection (class 0 = person)
+    print("Loading person detection model...")
+    model_person = YOLO('yolov8n.pt')  # Standard model with person class
 
     helmet_ids = get_target_class_ids(model_helmet, ['Hardhat', 'NO-Hardhat'])
     vest_ids = get_target_class_ids(model_vest, ['Safety Vest', 'NO-Safety Vest'])
@@ -152,6 +156,10 @@ def main():
     
     # Track which trackers have been assigned person IDs
     tracker_person_map = {}  # {(cam_idx, tracker_id): person_id}
+    
+    # Face recognition confirmation tracking (2-second window)
+    face_confirmation = {}  # {tracker_id: {'person_id': id, 'start_time': timestamp, 'confirmed': bool}}
+    CONFIRMATION_DURATION = 2.0  # Seconds required for confirmation
 
     print("Starting Multi-Cam Inference with Face Tracking. Press 'Q' to quit.")
 
@@ -171,13 +179,27 @@ def main():
             # Draw "Active" indicator
             cv2.circle(frame, (30, 30), 10, (0, 255, 0), -1)
             
+            # --- PERSON DETECTION (For Tracking) ---
+            # Use standard YOLO person class (class 0) to detect people from all angles
+            res_person = model_person.track(frame, conf=0.25, persist=True, classes=[0], imgsz=INFERENCE_IMGSZ, verbose=False, iou=IOU_THRESHOLD)
+            
+            # Track person bounding boxes
+            tracked_persons = {}  # {tracker_id: bbox}
+            if res_person and len(res_person) > 0:
+                result = res_person[0]
+                if result.boxes.id is not None:
+                    boxes = result.boxes.xyxy.cpu().numpy()
+                    ids = result.boxes.id.cpu().numpy().astype(int)
+                    for b, tid in zip(boxes, ids):
+                        tracked_persons[tid] = b
+                        print(f"[PersonDetect] Person detected: tracker {tid}")
+            
             # --- PPE DETECTION (All Cameras) ---
             res_h = model_helmet.track(frame, conf=BASE_CONF, persist=True, classes=helmet_ids, imgsz=INFERENCE_IMGSZ, verbose=False, iou=IOU_THRESHOLD)
             res_v = model_vest.track(frame, conf=BASE_CONF, persist=True, classes=vest_ids, imgsz=INFERENCE_IMGSZ, verbose=False, iou=IOU_THRESHOLD)
             
             # Collect all detections
             all_detections = []
-            tracked_persons = {}  # {tracker_id: bbox}
             
             for res, model in [(res_h, model_helmet), (res_v, model_vest)]:
                 if res and len(res) > 0:
@@ -190,10 +212,6 @@ def main():
                         for b, tid, c, cf in zip(boxes, ids, clss, confs):
                             c_name = model.names[c]
                             all_detections.append((b, tid, c_name, cf))
-                            
-                            # Track person bounding boxes for face recognition
-                            if c_name in ['Hardhat', 'NO-Hardhat']:
-                                tracked_persons[tid] = b
                     elif result.boxes.xyxy is not None:
                         boxes = result.boxes.xyxy.cpu().numpy()
                         clss = result.boxes.cls.cpu().numpy().astype(int)
@@ -234,8 +252,7 @@ def main():
                         best_distance = float('inf')
                         
                         for tracker_id, person_bbox in tracked_persons.items():
-                            # Calculate distance between face and person bounding boxes
-                            # Face should be within or near the person bbox
+                            # Calculate distance between face center and person center
                             face_center_x = (face_bbox[0] + face_bbox[2]) / 2
                             face_center_y = (face_bbox[1] + face_bbox[3]) / 2
                             person_center_x = (person_bbox[0] + person_bbox[2]) / 2
@@ -243,27 +260,74 @@ def main():
                             
                             distance = np.sqrt((face_center_x - person_center_x)**2 + (face_center_y - person_center_y)**2)
                             
-                            # Check if face is roughly in upper half of person bbox
-                            face_y_in_person = face_bbox[1] >= person_bbox[1] and face_bbox[1] <= (person_bbox[1] + person_bbox[3]) / 2
-                            
-                            if distance < best_distance and face_y_in_person:
+                            if distance < best_distance:
                                 best_distance = distance
                                 best_tracker_id = tracker_id
                         
-                        # Link face to tracker if close enough (increased threshold)
-                        if best_tracker_id is not None and best_distance < 300:
-                            if person_id:  # Authorized person
-                                central_manager.register_person(
-                                    person_id=person_id,
-                                    tracker_id=best_tracker_id,
-                                    camera_id=camera_id,
-                                    face_embedding=None,
-                                    bbox=tracked_persons[best_tracker_id]
-                                )
-                                tracker_person_map[(cam_idx, best_tracker_id)] = person_id
-                                print(f"[Entrance] ✓ Assigned Person {person_id} to tracker {best_tracker_id} (distance: {best_distance:.1f})")
+                        print(f"[FaceLink] Best tracker: {best_tracker_id}, distance: {best_distance:.1f}")
+                        
+                        # Link face to tracker if close enough
+                        if best_tracker_id is not None and best_distance < 500:
+                            current_time = time.time()
+                            
+                            if person_id:  # Authorized person detected
+                                # Check if this tracker already has a confirmed ID
+                                if (cam_idx, best_tracker_id) in tracker_person_map:
+                                    # Already confirmed, skip
+                                    continue
+                                
+                                # Check confirmation status for this tracker
+                                if best_tracker_id not in face_confirmation:
+                                    # First detection - start confirmation timer
+                                    face_confirmation[best_tracker_id] = {
+                                        'person_id': person_id,
+                                        'start_time': current_time,
+                                        'confirmed': False
+                                    }
+                                    print(f"[Entrance] ⏱ Starting confirmation for Person {person_id} on tracker {best_tracker_id}")
+                                
+                                else:
+                                    # Check if same person ID
+                                    conf_data = face_confirmation[best_tracker_id]
+                                    
+                                    if conf_data['person_id'] == person_id:
+                                        # Same person - check if 2 seconds have passed
+                                        elapsed = current_time - conf_data['start_time']
+                                        
+                                        if not conf_data['confirmed'] and elapsed >= CONFIRMATION_DURATION:
+                                            # CONFIRMED! Assign permanent ID
+                                            central_manager.register_person(
+                                                person_id=person_id,
+                                                tracker_id=best_tracker_id,
+                                                camera_id=camera_id,
+                                                face_embedding=None,
+                                                bbox=tracked_persons[best_tracker_id]
+                                            )
+                                            tracker_person_map[(cam_idx, best_tracker_id)] = person_id
+                                            face_confirmation[best_tracker_id]['confirmed'] = True
+                                            print(f"[Entrance] ✅ CONFIRMED! Assigned Person {person_id} to tracker {best_tracker_id} after {elapsed:.1f}s")
+                                        elif not conf_data['confirmed']:
+                                            print(f"[Entrance] ⏱ Confirming Person {person_id} ({elapsed:.1f}/{CONFIRMATION_DURATION}s)")
+                                    else:
+                                        # Different person detected - restart timer
+                                        face_confirmation[best_tracker_id] = {
+                                            'person_id': person_id,
+                                            'start_time': current_time,
+                                            'confirmed': False
+                                        }
+                                        print(f"[Entrance] ⏱ Person ID changed, restarting confirmation for Person {person_id}")
+                                        
                             else:  # Unauthorized person
-                                # Check if already registered
+                                # CRITICAL: Do not overwrite confirmed Person IDs!
+                                # Check if this tracker already has a confirmed ID
+                                if (cam_idx, best_tracker_id) in tracker_person_map:
+                                    existing_id = tracker_person_map[(cam_idx, best_tracker_id)]
+                                    # If already has a Person ID (01, 02, etc.), keep it
+                                    if existing_id and not existing_id.startswith('U'):
+                                        print(f"[Entrance] ℹ Tracker {best_tracker_id} already has confirmed ID {existing_id}, keeping it")
+                                        continue  # Skip unauthorized registration
+                                
+                                # Check if already registered as unauthorized
                                 existing_person_id = central_manager.get_person_by_tracker(best_tracker_id, camera_id)
                                 if not existing_person_id:
                                     person_id = central_manager.register_unauthorized_person(
@@ -307,6 +371,51 @@ def main():
                     else:
                         # Unknown person (not yet recognized)
                         tracker_person_map[(cam_idx, tracker_id)] = "???"
+
+            # --- DRAW PERSISTENT PERSON ID BOXES ---
+            # Draw Person ID box at HEAD LEVEL for each tracked person (like a face box)
+            print(f"[Debug] Tracked persons: {len(tracked_persons)}, Person map: {tracker_person_map}")  # Debug
+            for tracker_id, person_bbox in tracked_persons.items():
+                person_id = tracker_person_map.get((cam_idx, tracker_id), None)
+                print(f"[Debug] Tracker {tracker_id}: Person ID = {person_id}")  # Debug
+                
+                # Only draw if person has a confirmed ID (not "???")
+                if person_id and person_id != "???":
+                    px1, py1, px2, py2 = map(int, person_bbox)
+                    
+                    # Calculate head-level box (top 30% of person bbox)
+                    person_height = py2 - py1
+                    person_width = px2 - px1
+                    
+                    # Create face-like box at head level
+                    face_height = int(person_height * 0.35)
+                    face_width = int(person_width * 0.7)
+                    
+                    # Center the box horizontally
+                    center_x = (px1 + px2) // 2
+                    fx1 = center_x - face_width // 2
+                    fx2 = center_x + face_width // 2
+                    fy1 = py1
+                    fy2 = py1 + face_height
+                    
+                    # Determine color and label based on authorization
+                    if person_id.startswith('U'):
+                        # Unauthorized
+                        id_color = (0, 0, 255)  # Red
+                        id_label = f"Unauthorized {person_id}"
+                    else:
+                        # Authorized
+                        id_color = (0, 255, 0)  # Green
+                        id_label = f"Person {person_id}"
+                    
+                    print(f"[Debug] Drawing persistent box for {id_label}")  # Debug
+                    # Draw "Face Box" at head level
+                    cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), id_color, 3)
+                    
+                    # Draw Person ID label at bottom of face box
+                    (pid_w, pid_h), _ = cv2.getTextSize(id_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    cv2.rectangle(frame, (fx1, fy2 + 5), (fx1 + pid_w + 10, fy2 + pid_h + 15), id_color, -1)
+                    cv2.putText(frame, id_label, (fx1 + 5, fy2 + pid_h + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
             # --- DRAWING ---
             for box, track_id, class_name, conf in all_detections:
@@ -400,6 +509,7 @@ def main():
             # Show tracking stats
             stats = central_manager.get_stats()
             stats_text = f"Active: {stats['total_persons']} | Auth: {stats['authorized']} | Unauth: {stats['unauthorized']}"
+            print(f"[Stats] {stats_text}")  # Debug print
             cv2.putText(frame, stats_text, (10, CAM_SIZE[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
             
             processed_frames.append(frame)
