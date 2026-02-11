@@ -24,8 +24,8 @@ CAM_CONFIG = [
 ]
 
 # Paths
-HELMET_MODEL_PATH = r"C:\Users\Mzain\OneDrive\Desktop\Syed-PPE\best1.pt"
-VEST_MODEL_PATH = r"C:\Users\Mzain\OneDrive\Desktop\Syed-PPE\check.pt"
+HELMET_MODEL_PATH = r"C:\Users\Mzain\OneDrive\Desktop\Syed-PPE\helmet.pt"
+VEST_MODEL_PATH = r"C:\Users\Mzain\OneDrive\Desktop\Syed-PPE\vest.pt"
 FACE_DB_PATH = r"C:\Users\Mzain\OneDrive\Desktop\Syed-PPE\face_database.pkl"
 
 # Settings
@@ -132,7 +132,8 @@ def main():
     print("Loading person detection model...")
     model_person = YOLO('yolov8n.pt')  # Standard model with person class
 
-    helmet_ids = get_target_class_ids(model_helmet, ['Hardhat', 'NO-Hardhat'])
+    # Update: Include classes from new helmet.pt model ('head', 'helmet', 'hi-viz helmet')
+    helmet_ids = get_target_class_ids(model_helmet, ['Hardhat', 'NO-Hardhat', 'head', 'helmet', 'hi-viz helmet'])
     vest_ids = get_target_class_ids(model_vest, ['Safety Vest', 'NO-Safety Vest'])
 
     # Start Camera Streams
@@ -211,6 +212,13 @@ def main():
                         confs = result.boxes.conf.cpu().numpy()
                         for b, tid, c, cf in zip(boxes, ids, clss, confs):
                             c_name = model.names[c]
+                            
+                            # MAP NEW MODEL CLASSES TO TARGET CLASSES
+                            if c_name in ['helmet', 'hi-viz helmet']:
+                                c_name = 'Hardhat'
+                            elif c_name == 'head':
+                                c_name = 'NO-Hardhat'
+                                
                             all_detections.append((b, tid, c_name, cf))
                     elif result.boxes.xyxy is not None:
                         boxes = result.boxes.xyxy.cpu().numpy()
@@ -218,6 +226,13 @@ def main():
                         confs = result.boxes.conf.cpu().numpy()
                         for b, c, cf in zip(boxes, clss, confs):
                             c_name = model.names[c]
+
+                            # MAP NEW MODEL CLASSES TO TARGET CLASSES
+                            if c_name in ['helmet', 'hi-viz helmet']:
+                                c_name = 'Hardhat'
+                            elif c_name == 'head':
+                                c_name = 'NO-Hardhat'
+
                             all_detections.append((b, -1, c_name, cf))
 
             # --- FACE RECOGNITION (Entrance Camera Only) ---
@@ -231,6 +246,7 @@ def main():
                     if len(face_results) > 0:
                         print(f"[FaceDetection] Found {len(face_results)} face(s)")
                     
+                    trackers_with_faces = set()
                     for face_result in face_results:
                         person_id = face_result['person_id']
                         face_bbox = face_result['bbox']
@@ -268,54 +284,18 @@ def main():
                         
                         # Link face to tracker if close enough
                         if best_tracker_id is not None and best_distance < 500:
-                            current_time = time.time()
-                            
                             if person_id:  # Authorized person detected
-                                # Check if this tracker already has a confirmed ID
-                                if (cam_idx, best_tracker_id) in tracker_person_map:
-                                    # Already confirmed, skip
-                                    continue
-                                
-                                # Check confirmation status for this tracker
-                                if best_tracker_id not in face_confirmation:
-                                    # First detection - start confirmation timer
-                                    face_confirmation[best_tracker_id] = {
-                                        'person_id': person_id,
-                                        'start_time': current_time,
-                                        'confirmed': False
-                                    }
-                                    print(f"[Entrance] ⏱ Starting confirmation for Person {person_id} on tracker {best_tracker_id}")
-                                
-                                else:
-                                    # Check if same person ID
-                                    conf_data = face_confirmation[best_tracker_id]
-                                    
-                                    if conf_data['person_id'] == person_id:
-                                        # Same person - check if 2 seconds have passed
-                                        elapsed = current_time - conf_data['start_time']
-                                        
-                                        if not conf_data['confirmed'] and elapsed >= CONFIRMATION_DURATION:
-                                            # CONFIRMED! Assign permanent ID
-                                            central_manager.register_person(
-                                                person_id=person_id,
-                                                tracker_id=best_tracker_id,
-                                                camera_id=camera_id,
-                                                face_embedding=None,
-                                                bbox=tracked_persons[best_tracker_id]
-                                            )
-                                            tracker_person_map[(cam_idx, best_tracker_id)] = person_id
-                                            face_confirmation[best_tracker_id]['confirmed'] = True
-                                            print(f"[Entrance] ✅ CONFIRMED! Assigned Person {person_id} to tracker {best_tracker_id} after {elapsed:.1f}s")
-                                        elif not conf_data['confirmed']:
-                                            print(f"[Entrance] ⏱ Confirming Person {person_id} ({elapsed:.1f}/{CONFIRMATION_DURATION}s)")
-                                    else:
-                                        # Different person detected - restart timer
-                                        face_confirmation[best_tracker_id] = {
-                                            'person_id': person_id,
-                                            'start_time': current_time,
-                                            'confirmed': False
-                                        }
-                                        print(f"[Entrance] ⏱ Person ID changed, restarting confirmation for Person {person_id}")
+                                # Register person immediately
+                                central_manager.register_person(
+                                    person_id=person_id,
+                                    tracker_id=best_tracker_id,
+                                    camera_id=camera_id,
+                                    face_embedding=None,
+                                    bbox=tracked_persons[best_tracker_id]
+                                )
+                                tracker_person_map[(cam_idx, best_tracker_id)] = person_id
+                                print(f"[Entrance] ✅ Immediate Assignment: Person {person_id} to tracker {best_tracker_id}")
+                                trackers_with_faces.add(best_tracker_id)
                                         
                             else:  # Unauthorized person
                                 # CRITICAL: Do not overwrite confirmed Person IDs!
@@ -325,6 +305,7 @@ def main():
                                     # If already has a Person ID (01, 02, etc.), keep it
                                     if existing_id and not existing_id.startswith('U'):
                                         print(f"[Entrance] ℹ Tracker {best_tracker_id} already has confirmed ID {existing_id}, keeping it")
+                                        trackers_with_faces.add(best_tracker_id)
                                         continue  # Skip unauthorized registration
                                 
                                 # Check if already registered as unauthorized
@@ -337,6 +318,7 @@ def main():
                                     )
                                     tracker_person_map[(cam_idx, best_tracker_id)] = person_id
                                     print(f"[Entrance] ✗ Unauthorized person assigned: {person_id}")
+                                    trackers_with_faces.add(best_tracker_id)
                         else:
                             if best_tracker_id is None:
                                 print(f"[FaceDetection] No tracked persons found to link face")
@@ -378,6 +360,10 @@ def main():
             for tracker_id, person_bbox in tracked_persons.items():
                 person_id = tracker_person_map.get((cam_idx, tracker_id), None)
                 print(f"[Debug] Tracker {tracker_id}: Person ID = {person_id}")  # Debug
+                
+                # Skip if this person already has a face box drawn in this frame
+                if tracker_id in trackers_with_faces:
+                    continue
                 
                 # Only draw if person has a confirmed ID (not "???")
                 if person_id and person_id != "???":

@@ -1,0 +1,18 @@
+--- Helmet Model (helmet.pt) ---
+0: head
+1: helmet
+2: hi-viz helmet
+3: hi-viz vest
+4: person
+
+--- Vest Model (vest.pt) ---
+0: Hardhat
+1: Mask
+2: NO-Hardhat
+3: NO-Mask
+4: NO-Safety Vest
+5: Person
+6: Safety Cone
+7: Safety Vest
+8: machinery
+9: vehicle
