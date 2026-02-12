@@ -435,8 +435,6 @@ def main():
 
             # --- PERSON TRACKING (All Cameras) ---
             # For each tracked person, assign or retrieve person ID
-            # --- PERSON TRACKING (All Cameras) ---
-            # For each tracked person, assign or retrieve person ID
             for tracker_id in tracked_persons.keys():
                 # Check if we already have a person ID for this tracker
                 person_id = None
@@ -460,29 +458,48 @@ def main():
                     if person_id:
                         tracker_person_map[(cam_idx, tracker_id)] = person_id
                     else:
-                        # Fallback: Force-assign recent entrance ID for side cameras
-                        # RETRY logic: Always try this if we don't have a solid ID yet
-                        if not is_entrance:
-                            print(f"[Debug] Cam {camera_id}: Attempting force ID for tracker {tracker_id}")
-                            forced_id = central_manager.force_get_recent_id()
-                            if forced_id:
+                        # Mark as unidentified for now (will be resolved in batch below)
+                        tracker_person_map[(cam_idx, tracker_id)] = "???"
+            
+            # --- BATCH FORCE ID ASSIGNMENT (Side Cameras Only) ---
+            # After individual matching, assign remaining "???" trackers to available entrance IDs
+            if not is_entrance:
+                # Find all unidentified trackers
+                unidentified_trackers = [(tid, bbox) for tid, bbox in tracked_persons.items() 
+                                        if tracker_person_map.get((cam_idx, tid)) == "???"]
+                
+                if unidentified_trackers:
+                    print(f"[Debug] Cam {camera_id}: {len(unidentified_trackers)} unidentified trackers")
+                    
+                    # Get already-assigned IDs from CURRENTLY ACTIVE trackers only (not historical)
+                    assigned_ids = set(tracker_person_map.get((cam_idx, tid)) 
+                                      for tid in tracked_persons.keys() 
+                                      if tracker_person_map.get((cam_idx, tid)) and 
+                                         tracker_person_map.get((cam_idx, tid)) != "???")
+                    
+                    print(f"[Debug] Currently assigned IDs on {camera_id}: {assigned_ids}")
+                    
+                    # Get all recent persons from entrance (excluding already assigned)
+                    recent_persons = central_manager.get_all_recent_ids(exclude_ids=assigned_ids)
+                    
+                    if recent_persons:
+                        # Simple greedy matching: assign in order of recency
+                        # (More sophisticated: could do Hungarian algorithm based on spatial position)
+                        for idx, (tracker_id, bbox) in enumerate(unidentified_trackers):
+                            if idx < len(recent_persons):
+                                forced_id, time_diff = recent_persons[idx]
                                 print(f"[SideCam] Force-assigning {forced_id} to tracker {tracker_id} on {camera_id}")
-                                person_id = forced_id
-                                tracker_person_map[(cam_idx, tracker_id)] = person_id
+                                
+                                tracker_person_map[(cam_idx, tracker_id)] = forced_id
+                                
                                 # Register this new location so it sticks
                                 central_manager.register_person(
-                                    person_id=person_id,
+                                    person_id=forced_id,
                                     tracker_id=tracker_id,
                                     camera_id=camera_id,
                                     face_embedding=None,
-                                    bbox=tracked_persons[tracker_id]
+                                    bbox=bbox
                                 )
-                            else:
-                                print(f"[Debug] Cam {camera_id}: force_get_recent_id returned None")
-                        
-                        if not person_id:
-                            # Unknown person (not yet recognized)
-                            tracker_person_map[(cam_idx, tracker_id)] = "???"
 
             # --- DRAW PERSISTENT PERSON ID BOXES ---
             # Draw Person ID box at HEAD LEVEL for each tracked person (like a face box)

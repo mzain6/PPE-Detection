@@ -56,6 +56,8 @@ class CentralTrackingManager:
             }
             self.active_persons[person_id]['last_seen'] = time.time()
             
+            print(f"[CentralManager] Updated {person_id} on {camera_id} (tracker={tracker_id}), total active: {len(self.active_persons)}")
+            
             # Map tracker to person
             self.tracker_to_person[camera_id][tracker_id] = person_id
             
@@ -230,6 +232,53 @@ class CentralTrackingManager:
                 print(f"[CentralManager] Force-Found recent person: {best_person_id} (seen {min_time_diff:.1f}s ago)")
                 return best_person_id
             return None
+    
+    def get_all_recent_ids(self, exclude_ids=None, timeout=60.0):
+        """
+        Get ALL recently active authorized person IDs for multi-person matching.
+        
+        Args:
+            exclude_ids: Set of person IDs to exclude (already assigned)
+            timeout: Max time since last seen (seconds)
+            
+        Returns:
+            List of (person_id, last_seen_time) tuples, sorted by recency
+        """
+        with self.lock:
+            recent_persons = []
+            current_time = time.time()
+            exclude_ids = exclude_ids or set()
+            
+            print(f"[CentralManager] get_all_recent_ids called, exclude_ids={exclude_ids}")
+            print(f"[CentralManager] Active persons: {list(self.active_persons.keys())}")
+            
+            for person_id, data in self.active_persons.items():
+                time_diff = current_time - data['last_seen']
+                
+                # Debug each person
+                is_unauth = person_id.startswith('U')
+                is_excluded = person_id in exclude_ids
+                is_too_old = time_diff >= timeout
+                
+                print(f"[CentralManager]   {person_id}: unauth={is_unauth}, excluded={is_excluded}, age={time_diff:.1f}s (max={timeout}s)")
+                
+                # Skip unauthorized and excluded IDs
+                if is_unauth or is_excluded:
+                    continue
+                
+                if time_diff < timeout:
+                    recent_persons.append((person_id, time_diff))
+            
+            # Sort by recency (most recent first)
+            recent_persons.sort(key=lambda x: x[1])
+            
+            if recent_persons:
+                ids = [pid for pid, _ in recent_persons]
+                print(f"[CentralManager] Found {len(recent_persons)} recent persons: {ids}")
+            else:
+                print(f"[CentralManager] No recent persons found!")
+            
+            return recent_persons
     
     def remove_tracker(self, tracker_id, camera_id):
         """
