@@ -143,8 +143,8 @@ class CentralTrackingManager:
                 # Check temporal continuity (person seen recently in other camera)
                 time_since_last_seen = current_time - person_data['last_seen']
                 
-                # Must be seen within last 5 seconds
-                if time_since_last_seen > 5.0:
+                # Must be seen within last 60 seconds (increased for back-and-forth movement)
+                if time_since_last_seen > 60.0:
                     continue
                 
                 # Calculate spatial plausibility
@@ -152,14 +152,17 @@ class CentralTrackingManager:
                 # For now, we assume cameras are adjacent
                 
                 # Simple heuristic: recent person likely moved to new camera
-                match_score = 1.0 - (time_since_last_seen / 5.0)  # Score based on recency
+                # We give a boost to re-identification to ensure IDs stick
+                base_score = 0.8  # Start with high confidence for any plausible match
+                time_penalty = (time_since_last_seen / 60.0) * 0.5  # Max penalty 0.5
+                match_score = base_score - time_penalty
                 
                 if match_score > best_match_score:
                     best_match_score = match_score
                     best_match_id = person_id
             
-            # Require at least 50% confidence
-            if best_match_score >= 0.5:
+            # Require at least 20% confidence (very loose to catch everything)
+            if best_match_score >= 0.2:
                 print(f"[CentralManager] Camera {camera_id}: Matched tracker {tracker_id} to {best_match_id} (score: {best_match_score:.2f})")
                 
                 # Update person's location
@@ -194,6 +197,39 @@ class CentralTrackingManager:
                     self.active_persons[person_id]['cameras'][camera_id]['bbox'] = bbox
                     self.active_persons[person_id]['cameras'][camera_id]['last_seen'] = time.time()
                     self.active_persons[person_id]['last_seen'] = time.time()
+
+    def force_get_recent_id(self, exclude_camera_id=None, timeout=60.0):
+        """
+        Aggressively get the most recently active authorized person ID.
+        Used to force-match people on side cameras to the entrance ID.
+        """
+        with self.lock:
+            best_person_id = None
+            min_time_diff = float('inf')
+            current_time = time.time()
+            
+            for person_id, data in self.active_persons.items():
+                # Skip unauthorized temporary IDs if we want strictly the "Entrance ID"
+                if person_id.startswith('U'):
+                    continue
+                    
+                # Check if this person was seen recently anywhere
+                time_diff = current_time - data['last_seen']
+                
+                if time_diff < timeout and time_diff < min_time_diff:
+                    # Also, prefer people seen on Entrance (Cam 1)
+                    # We can check data['cameras'] keys.
+                    is_entrance_person = any(c for c in data['cameras'] if "Cam 1" in c or "Entrance" in c)
+                    
+                    # If we really want to enforce "from Entrance", we could require is_entrance_person
+                    # But for now, just taking the most recent authorized person is a good heuristic
+                    min_time_diff = time_diff
+                    best_person_id = person_id
+            
+            if best_person_id:
+                print(f"[CentralManager] Force-Found recent person: {best_person_id} (seen {min_time_diff:.1f}s ago)")
+                return best_person_id
+            return None
     
     def remove_tracker(self, tracker_id, camera_id):
         """

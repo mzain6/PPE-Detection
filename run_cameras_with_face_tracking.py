@@ -19,8 +19,10 @@ from central_tracking_manager import CentralTrackingManager
 CAM_CONFIG = [
     # Cam 1: Entrance camera with face recognition (WEBCAM)
     {"id": "Cam 1", "url": 0, "is_entrance": True},
-    # Cam 2: Disabled for testing
-    # {"id": "Cam 2", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=5&subtype=1", "is_entrance": False},
+    # Cam 2: Side camera (RTSP Channel 1)
+    {"id": "Cam 2", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=1&subtype=1", "is_entrance": False},
+    # Cam 3: Side camera (RTSP Channel 5)
+    {"id": "Cam 3", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=5&subtype=1", "is_entrance": False},
 ]
 
 # Paths
@@ -57,6 +59,8 @@ class CameraStream:
             src = int(src)
             
         self.capture = cv2.VideoCapture(src)
+        # Reduce buffer size for real-time RTSP
+        self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.status = self.capture.isOpened()
         if not self.status:
             print(f"[Error] Failed to open Camera {channel_id}")
@@ -158,9 +162,15 @@ def main():
     # Track which trackers have been assigned person IDs
     tracker_person_map = {}  # {(cam_idx, tracker_id): person_id}
     
-    # Face recognition confirmation tracking (2-second window)
-    face_confirmation = {}  # {tracker_id: {'person_id': id, 'start_time': timestamp, 'confirmed': bool}}
-    CONFIRMATION_DURATION = 2.0  # Seconds required for confirmation
+    # Coasting memory for anti-flicker
+    # {(cam_idx, tracker_id): {'bbox': bbox, 'person_id': id, 'last_seen': time}}
+    # Coasting memory for anti-flicker
+    # {(cam_idx, tracker_id): {'bbox': bbox, 'person_id': id, 'last_seen': time}}
+    tracker_coasting = {}
+    
+    # Cache for PPE detections during frame skipping
+    # {cam_idx: [(box, track_id, class_name, conf), ...]}
+    last_ppe_detections = {}
 
     print("Starting Multi-Cam Inference with Face Tracking. Press 'Q' to quit.")
 
@@ -180,60 +190,130 @@ def main():
             # Draw "Active" indicator
             cv2.circle(frame, (30, 30), 10, (0, 255, 0), -1)
             
-            # --- PERSON DETECTION (For Tracking) ---
-            # Use standard YOLO person class (class 0) to detect people from all angles
-            res_person = model_person.track(frame, conf=0.25, persist=True, classes=[0], imgsz=INFERENCE_IMGSZ, verbose=False, iou=IOU_THRESHOLD)
+            current_time = time.time()
+            tracked_persons = {}
             
-            # Track person bounding boxes
-            tracked_persons = {}  # {tracker_id: bbox}
-            if res_person and len(res_person) > 0:
-                result = res_person[0]
-                if result.boxes.id is not None:
-                    boxes = result.boxes.xyxy.cpu().numpy()
-                    ids = result.boxes.id.cpu().numpy().astype(int)
-                    for b, tid in zip(boxes, ids):
-                        tracked_persons[tid] = b
-                        print(f"[PersonDetect] Person detected: tracker {tid}")
+            # --- FRAME SKIPPING OPTIMIZATION ---
+            DO_INFERENCE = (frame_count % 2 == 0)
             
-            # --- PPE DETECTION (All Cameras) ---
-            res_h = model_helmet.track(frame, conf=BASE_CONF, persist=True, classes=helmet_ids, imgsz=INFERENCE_IMGSZ, verbose=False, iou=IOU_THRESHOLD)
-            res_v = model_vest.track(frame, conf=BASE_CONF, persist=True, classes=vest_ids, imgsz=INFERENCE_IMGSZ, verbose=False, iou=IOU_THRESHOLD)
-            
-            # Collect all detections
+            # Initialize collections
+            tracked_persons = {}
             all_detections = []
             
-            for res, model in [(res_h, model_helmet), (res_v, model_vest)]:
-                if res and len(res) > 0:
-                    result = res[0]
+            if DO_INFERENCE:
+                # 1. PERSON DETECTION (Lowered conf to 0.15)
+                res_person = model_person.track(frame, conf=0.15, persist=True, classes=[0], imgsz=INFERENCE_IMGSZ, verbose=False, iou=IOU_THRESHOLD)
+                
+                if res_person and len(res_person) > 0:
+                    result = res_person[0]
                     if result.boxes.id is not None:
                         boxes = result.boxes.xyxy.cpu().numpy()
                         ids = result.boxes.id.cpu().numpy().astype(int)
-                        clss = result.boxes.cls.cpu().numpy().astype(int)
-                        confs = result.boxes.conf.cpu().numpy()
-                        for b, tid, c, cf in zip(boxes, ids, clss, confs):
-                            c_name = model.names[c]
+                        for b, tid in zip(boxes, ids):
+                            tracked_persons[tid] = b
+                
+                # 2. PPE DETECTION
+                res_h = model_helmet.track(frame, conf=BASE_CONF, persist=True, classes=helmet_ids, imgsz=INFERENCE_IMGSZ, verbose=False, iou=IOU_THRESHOLD)
+                res_v = model_vest.track(frame, conf=BASE_CONF, persist=True, classes=vest_ids, imgsz=INFERENCE_IMGSZ, verbose=False, iou=IOU_THRESHOLD)
+                
+                for res, model in [(res_h, model_helmet), (res_v, model_vest)]:
+                    if res and len(res) > 0:
+                        result = res[0]
+                        if result.boxes.id is not None:
+                            boxes = result.boxes.xyxy.cpu().numpy()
+                            ids = result.boxes.id.cpu().numpy().astype(int)
+                            clss = result.boxes.cls.cpu().numpy().astype(int)
+                            confs = result.boxes.conf.cpu().numpy()
+                            for b, tid, c, cf in zip(boxes, ids, clss, confs):
+                                c_name = model.names[c]
+                                if c_name in ['helmet', 'hi-viz helmet']: c_name = 'Hardhat'
+                                elif c_name == 'head': c_name = 'NO-Hardhat'
+                                all_detections.append((b, tid, c_name, cf))
+                        elif result.boxes.xyxy is not None:
+                            # Untracked detections
+                            boxes = result.boxes.xyxy.cpu().numpy()
+                            clss = result.boxes.cls.cpu().numpy().astype(int)
+                            confs = result.boxes.conf.cpu().numpy()
+                            for b, c, cf in zip(boxes, clss, confs):
+                                c_name = model.names[c]
+                                if c_name in ['helmet', 'hi-viz helmet']: c_name = 'Hardhat'
+                                elif c_name == 'head': c_name = 'NO-Hardhat'
+                                all_detections.append((b, -1, c_name, cf))
+                
+                # 3. PROXY TRACKER CREATION (Fallback for missing people)
+                # Ifwe have a PPE detection that is NOT inside a person box, create a proxy person
+                for idx, (ppe_box, ppe_tid, ppe_class, ppe_conf) in enumerate(all_detections):
+                    # Determine the proxy ID
+                    if ppe_tid == -1:
+                        # Untracked PPE: use hash-based temporary ID
+                        proxy_id = 10000 + hash((cam_idx, tuple(ppe_box), ppe_class)) % 10000
+                    else:
+                        # Tracked PPE: use fixed offset
+                        proxy_id = 10000 + ppe_tid
+                    
+                    # Check if inside any existing person
+                    is_inside = False
+                    px1, py1, px2, py2 = ppe_box
+                    ppe_center = ((px1+px2)/2, (py1+py2)/2)
+                    
+                    for person_box in tracked_persons.values():
+                        bx1, by1, bx2, by2 = person_box
+                        if bx1 < ppe_center[0] < bx2 and by1 < ppe_center[1] < by2:
+                            is_inside = True
+                            break
+                    
+                    if not is_inside:
+                        # Create Proxy Person Box
+                        # Estimate Body Box
+                        width = px2 - px1
+                        height = py2 - py1
+                        
+                        if 'Vest' in ppe_class:
+                            # Vest is torso -> Extrapolate Head up and Legs down
+                            proxy_box = [px1, max(0, py1 - height*0.3), px2, min(CAM_SIZE[1], py2 + height*1.5)]
+                        else:
+                            # Head/Helmet -> Extrapolate Body down
+                            proxy_box = [max(0, px1 - width*0.5), py1, min(CAM_SIZE[0], px2 + width*0.5), min(CAM_SIZE[1], py2 + height*4.0)]
                             
-                            # MAP NEW MODEL CLASSES TO TARGET CLASSES
-                            if c_name in ['helmet', 'hi-viz helmet']:
-                                c_name = 'Hardhat'
-                            elif c_name == 'head':
-                                c_name = 'NO-Hardhat'
-                                
-                            all_detections.append((b, tid, c_name, cf))
-                    elif result.boxes.xyxy is not None:
-                        boxes = result.boxes.xyxy.cpu().numpy()
-                        clss = result.boxes.cls.cpu().numpy().astype(int)
-                        confs = result.boxes.conf.cpu().numpy()
-                        for b, c, cf in zip(boxes, clss, confs):
-                            c_name = model.names[c]
+                        tracked_persons[proxy_id] = np.array(proxy_box)
+                        print(f"[Proxy] Created proxy {proxy_id} from {ppe_class} (tid={ppe_tid}) on {camera_id}")
 
-                            # MAP NEW MODEL CLASSES TO TARGET CLASSES
-                            if c_name in ['helmet', 'hi-viz helmet']:
-                                c_name = 'Hardhat'
-                            elif c_name == 'head':
-                                c_name = 'NO-Hardhat'
+                # 4. UPDATE COASTING with fresh data
+                for tid, bbox in tracked_persons.items():
+                    pid = tracker_person_map.get((cam_idx, tid))
+                    tracker_coasting[(cam_idx, tid)] = {
+                        'bbox': bbox,
+                        'person_id': pid,
+                        'last_seen': current_time
+                    }
+                
+                # 5. CACHE PPE
+                last_ppe_detections[cam_idx] = all_detections
 
-                            all_detections.append((b, -1, c_name, cf))
+            else:
+                # SKIP INFERENCE case
+                all_detections = last_ppe_detections.get(cam_idx, [])
+                # tracked_persons remains empty, will be filled by coasting restoration below
+
+            # --- COASTING RESTORATION (Anti-Flicker & Frame Skipping Fill) ---
+            # Restore tracks if:
+            # 1. We skipped inference (fill from memory)
+            # 2. We ran inference but lost the track temporarily (anti-flicker)
+            
+            cam_coasters = [k for k in tracker_coasting.keys() if k[0] == cam_idx]
+            
+            for k in cam_coasters:
+                tid = k[1]
+                data = tracker_coasting[k]
+                
+                # If identifier not in current detections (either because skipped or lost)
+                if tid not in tracked_persons:
+                    # If within memory window (1.0s)
+                    if current_time - data['last_seen'] < 1.0:
+                        tracked_persons[tid] = data['bbox']
+                        # Ensure ID map has it
+                        if data['person_id'] and (cam_idx, tid) not in tracker_person_map:
+                             tracker_person_map[(cam_idx, tid)] = data['person_id']
 
             # --- FACE RECOGNITION (Entrance Camera Only) ---
             face_boxes_to_draw = []  # Store face boxes to draw separately
@@ -267,18 +347,41 @@ def main():
                         best_tracker_id = None
                         best_distance = float('inf')
                         
-                        for tracker_id, person_bbox in tracked_persons.items():
-                            # Calculate distance between face center and person center
-                            face_center_x = (face_bbox[0] + face_bbox[2]) / 2
-                            face_center_y = (face_bbox[1] + face_bbox[3]) / 2
-                            person_center_x = (person_bbox[0] + person_bbox[2]) / 2
-                            person_center_y = (person_bbox[1] + person_bbox[3]) / 2
+                        # FALLBACK: If no tracked persons exist, create a proxy from the face
+                        if len(tracked_persons) == 0 and person_id:
+                            # Create proxy person box from face (estimate body as ~4x face height below)
+                            fx1, fy1, fx2, fy2 = face_bbox
+                            face_height = fy2 - fy1
+                            face_width = fx2 - fx1
                             
-                            distance = np.sqrt((face_center_x - person_center_x)**2 + (face_center_y - person_center_y)**2)
+                            # Estimate full body: face is roughly top 1/7 of body
+                            proxy_person_box = np.array([
+                                max(0, fx1 - face_width * 0.2),  # Slightly wider
+                                fy1,  # Start at face top
+                                min(CAM_SIZE[0], fx2 + face_width * 0.2),
+                                min(CAM_SIZE[1], fy2 + face_height * 5.0)  # Extend down
+                            ])
                             
-                            if distance < best_distance:
-                                best_distance = distance
-                                best_tracker_id = tracker_id
+                            # Use a special proxy ID (50000 range for face proxies)
+                            proxy_tracker_id = 50000 + hash(tuple(face_bbox)) % 1000
+                            tracked_persons[proxy_tracker_id] = proxy_person_box
+                            best_tracker_id = proxy_tracker_id
+                            best_distance = 0  # Perfect match since we created it from the face
+                            print(f"[FaceProxy] Created proxy person {proxy_tracker_id} from face detection")
+                        else:
+                            # Normal case: find closest existing tracked person
+                            for tracker_id, person_bbox in tracked_persons.items():
+                                # Calculate distance between face center and person center
+                                face_center_x = (face_bbox[0] + face_bbox[2]) / 2
+                                face_center_y = (face_bbox[1] + face_bbox[3]) / 2
+                                person_center_x = (person_bbox[0] + person_bbox[2]) / 2
+                                person_center_y = (person_bbox[1] + person_bbox[3]) / 2
+                                
+                                distance = np.sqrt((face_center_x - person_center_x)**2 + (face_center_y - person_center_y)**2)
+                                
+                                if distance < best_distance:
+                                    best_distance = distance
+                                    best_tracker_id = tracker_id
                         
                         print(f"[FaceLink] Best tracker: {best_tracker_id}, distance: {best_distance:.1f}")
                         
@@ -332,13 +435,19 @@ def main():
 
             # --- PERSON TRACKING (All Cameras) ---
             # For each tracked person, assign or retrieve person ID
+            # --- PERSON TRACKING (All Cameras) ---
+            # For each tracked person, assign or retrieve person ID
             for tracker_id in tracked_persons.keys():
                 # Check if we already have a person ID for this tracker
+                person_id = None
                 if (cam_idx, tracker_id) in tracker_person_map:
                     person_id = tracker_person_map[(cam_idx, tracker_id)]
-                else:
-                    # Query central manager
-                    person_id = central_manager.get_person_by_tracker(tracker_id, camera_id)
+                
+                # If ID is missing OR it is "???", try to resolve it
+                if not person_id or person_id == "???":
+                    # Query central manager first
+                    if not person_id:
+                        person_id = central_manager.get_person_by_tracker(tracker_id, camera_id)
                     
                     if not person_id:
                         # Try spatial-temporal matching
@@ -351,22 +460,44 @@ def main():
                     if person_id:
                         tracker_person_map[(cam_idx, tracker_id)] = person_id
                     else:
-                        # Unknown person (not yet recognized)
-                        tracker_person_map[(cam_idx, tracker_id)] = "???"
+                        # Fallback: Force-assign recent entrance ID for side cameras
+                        # RETRY logic: Always try this if we don't have a solid ID yet
+                        if not is_entrance:
+                            print(f"[Debug] Cam {camera_id}: Attempting force ID for tracker {tracker_id}")
+                            forced_id = central_manager.force_get_recent_id()
+                            if forced_id:
+                                print(f"[SideCam] Force-assigning {forced_id} to tracker {tracker_id} on {camera_id}")
+                                person_id = forced_id
+                                tracker_person_map[(cam_idx, tracker_id)] = person_id
+                                # Register this new location so it sticks
+                                central_manager.register_person(
+                                    person_id=person_id,
+                                    tracker_id=tracker_id,
+                                    camera_id=camera_id,
+                                    face_embedding=None,
+                                    bbox=tracked_persons[tracker_id]
+                                )
+                            else:
+                                print(f"[Debug] Cam {camera_id}: force_get_recent_id returned None")
+                        
+                        if not person_id:
+                            # Unknown person (not yet recognized)
+                            tracker_person_map[(cam_idx, tracker_id)] = "???"
 
             # --- DRAW PERSISTENT PERSON ID BOXES ---
             # Draw Person ID box at HEAD LEVEL for each tracked person (like a face box)
-            print(f"[Debug] Tracked persons: {len(tracked_persons)}, Person map: {tracker_person_map}")  # Debug
+            # print(f"[Debug] Tracked persons: {len(tracked_persons)}, Person map: {tracker_person_map}")  # Debug
             for tracker_id, person_bbox in tracked_persons.items():
                 person_id = tracker_person_map.get((cam_idx, tracker_id), None)
-                print(f"[Debug] Tracker {tracker_id}: Person ID = {person_id}")  # Debug
+                # print(f"[Debug] Tracker {tracker_id}: Person ID = {person_id}")  # Debug
                 
                 # Skip if this person already has a face box drawn in this frame
                 if tracker_id in trackers_with_faces:
                     continue
                 
                 # Only draw if person has a confirmed ID (not "???")
-                if person_id and person_id != "???":
+                # MODIFIED: Draw "???" as Yellow for debugging visibility
+                if person_id:
                     px1, py1, px2, py2 = map(int, person_bbox)
                     
                     # Calculate head-level box (top 30% of person bbox)
@@ -385,7 +516,10 @@ def main():
                     fy2 = py1 + face_height
                     
                     # Determine color and label based on authorization
-                    if person_id.startswith('U'):
+                    if person_id == "???":
+                        id_color = (0, 255, 255) # Yellow for unknown
+                        id_label = "Unidentified"
+                    elif person_id.startswith('U'):
                         # Unauthorized
                         id_color = (0, 0, 255)  # Red
                         id_label = f"Unauthorized {person_id}"
@@ -394,7 +528,7 @@ def main():
                         id_color = (0, 255, 0)  # Green
                         id_label = f"Person {person_id}"
                     
-                    print(f"[Debug] Drawing persistent box for {id_label}")  # Debug
+                    # print(f"[Debug] Drawing persistent box for {id_label}")  # Debug
                     # Draw "Face Box" at head level
                     cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), id_color, 3)
                     
