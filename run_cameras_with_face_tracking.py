@@ -479,22 +479,48 @@ def main():
                     
                     print(f"[Debug] Currently assigned IDs on {camera_id}: {assigned_ids}")
                     
-                    # Get all recent persons from entrance (excluding already assigned)
-                    recent_persons = central_manager.get_all_recent_ids(exclude_ids=assigned_ids)
+                    # Get all recent persons WITH POSITIONS from entrance (for spatial matching)
+                    recent_persons_with_pos = central_manager.get_all_recent_ids_with_positions(exclude_ids=assigned_ids)
                     
-                    if recent_persons:
-                        # Simple greedy matching: assign in order of recency
-                        # (More sophisticated: could do Hungarian algorithm based on spatial position)
-                        for idx, (tracker_id, bbox) in enumerate(unidentified_trackers):
-                            if idx < len(recent_persons):
-                                forced_id, time_diff = recent_persons[idx]
-                                print(f"[SideCam] Force-assigning {forced_id} to tracker {tracker_id} on {camera_id}")
+                    if recent_persons_with_pos:
+                        # SPATIAL MATCHING: Assign IDs based on position similarity
+                        # Calculate distances between each tracker and each person
+                        assignments = []  # List of (tracker_id, person_id, bbox) tuples
+                        
+                        for tracker_id, bbox in unidentified_trackers:
+                            # Calculate tracker center
+                            tracker_cx = (bbox[0] + bbox[2]) / 2
+                            tracker_cy = (bbox[1] + bbox[3]) / 2
+                            
+                            best_person_id = None
+                            min_distance = float('inf')
+                            
+                            for person_id, person_cx, person_cy in recent_persons_with_pos:
+                                # Calculate Euclidean distance between centers
+                                distance = np.sqrt((tracker_cx - person_cx)**2 + (tracker_cy - person_cy)**2)
                                 
-                                tracker_person_map[(cam_idx, tracker_id)] = forced_id
+                                if distance < min_distance:
+                                    min_distance = distance
+                                    best_person_id = person_id
+                            
+                            if best_person_id:
+                                assignments.append((tracker_id, best_person_id, bbox, min_distance))
+                        
+                        # Sort by distance to prioritize closer matches
+                        assignments.sort(key=lambda x: x[3])
+                        
+                        # Assign IDs, ensuring no duplicates
+                        used_ids = set()
+                        for tracker_id, person_id, bbox, distance in assignments:
+                            if person_id not in used_ids:
+                                print(f"[SideCam] Spatial-match {person_id} to tracker {tracker_id} on {camera_id} (dist={distance:.1f}px)")
+                                
+                                tracker_person_map[(cam_idx, tracker_id)] = person_id
+                                used_ids.add(person_id)
                                 
                                 # Register this new location so it sticks
                                 central_manager.register_person(
-                                    person_id=forced_id,
+                                    person_id=person_id,
                                     tracker_id=tracker_id,
                                     camera_id=camera_id,
                                     face_embedding=None,

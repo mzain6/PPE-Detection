@@ -280,6 +280,51 @@ class CentralTrackingManager:
             
             return recent_persons
     
+    def get_all_recent_ids_with_positions(self, exclude_ids=None, timeout=60.0):
+        """
+        Get ALL recently active authorized person IDs WITH their spatial positions.
+        Used for spatial matching to prevent ID swapping.
+        
+        Args:
+            exclude_ids: Set of person IDs to exclude (already assigned)
+            timeout: Max time since last seen (seconds)
+            
+        Returns:
+            List of (person_id, bbox_center_x, bbox_center_y) tuples
+        """
+        with self.lock:
+            recent_persons = []
+            current_time = time.time()
+            exclude_ids = exclude_ids or set()
+            
+            for person_id, data in self.active_persons.items():
+                # Skip unauthorized and excluded IDs
+                if person_id.startswith('U') or person_id in exclude_ids:
+                    continue
+                
+                time_diff = current_time - data['last_seen']
+                
+                if time_diff < timeout:
+                    # Get bounding box from any camera (prefer entrance)
+                    bbox = None
+                    for cam_id, cam_data in data['cameras'].items():
+                        if cam_data.get('bbox') is not None:
+                            bbox = cam_data['bbox']
+                            if 'Cam 1' in cam_id or 'Entrance' in cam_id:
+                                break  # Prefer entrance camera position
+                    
+                    if bbox is not None:
+                        # Calculate center position
+                        center_x = (bbox[0] + bbox[2]) / 2
+                        center_y = (bbox[1] + bbox[3]) / 2
+                        recent_persons.append((person_id, center_x, center_y))
+            
+            if recent_persons:
+                ids = [pid for pid, _, _ in recent_persons]
+                print(f"[CentralManager] Found {len(recent_persons)} persons with positions: {ids}")
+            
+            return recent_persons
+    
     def remove_tracker(self, tracker_id, camera_id):
         """
         Remove tracker when person leaves camera view
