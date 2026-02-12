@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PPE Violation Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+            text-align: center;
+            transition: transform 0.3s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .stat-value {
+            font-size: 3em;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 1.1em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .total {
+            color: #667eea;
+        }
+
+        .no-helmet {
+            color: #f59e0b;
+        }
+
+        .no-vest {
+            color: #ef4444;
+        }
+
+        .no-both {
+            color: #dc2626;
+        }
+
+        .alerts-section {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+        }
+
+        .alerts-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        h2 {
+            color: #333;
+            font-size: 1.8em;
+        }
+
+        .refresh-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 10px 25px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: transform 0.2s;
+        }
+
+        .refresh-btn:hover {
+            transform: scale(1.05);
+        }
+
+        .alert-list {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .alert-item {
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin-bottom: 15px;
+            background: #f9fafb;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .alert-item.NO_HELMET {
+            border-left-color: #f59e0b;
+        }
+
+        .alert-item.NO_VEST {
+            border-left-color: #ef4444;
+        }
+
+        .alert-item.NO_BOTH {
+            border-left-color: #dc2626;
+        }
+
+        .alert-info {
+            flex: 1;
+        }
+
+        .alert-type {
+            font-weight: bold;
+            font-size: 1.2em;
+            margin-bottom: 5px;
+        }
+
+        .alert-details {
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .alert-screenshot {
+            width: 150px;
+            height: 100px;
+            object-fit: cover;
+            border-radius: 8px;
+            margin-left: 15px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .no-alerts {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+            font-size: 1.2em;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>🚨 PPE Violation Dashboard</h1>
+
+        <!-- Statistics Cards -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Total Alerts</div>
+                <div class="stat-value total" id="stat-total">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">No Helmet</div>
+                <div class="stat-value no-helmet" id="stat-no-helmet">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">No Vest</div>
+                <div class="stat-value no-vest" id="stat-no-vest">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">No Both</div>
+                <div class="stat-value no-both" id="stat-no-both">-</div>
+            </div>
+        </div>
+
+        <!-- Recent Alerts -->
+        <div class="alerts-section">
+            <div class="alerts-header">
+                <h2>Recent Violations</h2>
+                <button class="refresh-btn" onclick="loadData()">🔄 Refresh</button>
+            </div>
+            <div class="alert-list" id="alert-list">
+                <div class="loading">Loading alerts...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+
+        async function loadStats() {
+            try {
+                const response = await fetch(`${API_BASE}/api/ppe-alerts/stats`);
+                const stats = await response.json();
+
+                document.getElementById('stat-total').textContent = stats.total_alerts;
+                document.getElementById('stat-no-helmet').textContent = stats.NO_HELMET;
+                document.getElementById('stat-no-vest').textContent = stats.NO_VEST;
+                document.getElementById('stat-no-both').textContent = stats.NO_BOTH;
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+
+        async function loadAlerts() {
+            try {
+                const response = await fetch(`${API_BASE}/api/ppe-alerts?limit=50`);
+                const data = await response.json();
+
+                const alertList = document.getElementById('alert-list');
+
+                if (data.alerts.length === 0) {
+                    alertList.innerHTML = '<div class="no-alerts">No violations detected yet</div>';
+                    return;
+                }
+
+                alertList.innerHTML = data.alerts.reverse().map(alert => {
+                    const timestamp = new Date(alert.timestamp).toLocaleString();
+                    const screenshotHtml = alert.screenshot_path
+                        ? `<img src="/${alert.screenshot_path}" class="alert-screenshot" alt="Violation screenshot">`
+                        : '';
+
+                    return `
+                        <div class="alert-item ${alert.violation_type}">
+                            <div class="alert-info">
+                                <div class="alert-type">${alert.violation_type.replace('_', ' ')}</div>
+                                <div class="alert-details">
+                                    Track ID: ${alert.track_id} | 
+                                    Camera: ${alert.camera_id} | 
+                                    Time: ${timestamp}
+                                </div>
+                            </div>
+                            ${screenshotHtml}
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('Error loading alerts:', error);
+                document.getElementById('alert-list').innerHTML =
+                    '<div class="loading">Error loading alerts. Is the server running?</div>';
+            }
+        }
+
+        function loadData() {
+            loadStats();
+            loadAlerts();
+        }
+
+        // Load data on page load
+        loadData();
+
+        // Auto-refresh every 5 seconds
+        setInterval(loadData, 5000);
+    </script>
+</body>
+
+</html>

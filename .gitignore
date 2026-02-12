@@ -1,0 +1,82 @@
+# Python Virtual Environment
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+
+# Model files - NOW TRACKED BY GIT LFS (see .gitattributes)
+# *.pt files are tracked by Git LFS
+*.pth
+*.weights
+*.onnx
+
+# Video files - NOW TRACKED BY GIT LFS (see .gitattributes)  
+# *.mp4 files are tracked by Git LFS
+*.avi
+*.mov
+*.mkv
+*.wmv
+
+# Image outputs (commented out to allow some examples)
+# *_detected*.jpeg
+# *_detected*.jpg
+# *_detected*.png
+# person_detected_output.jpeg
+# person_detected_detailed.jpeg
+# output_detected_video.mp4
+
+# Datasets
+datasets/
+data/
+
+# YOLOv8 runs and outputs
+runs/
+ultralytics_runs/
+
+# Temporary files
+uploads/
+temp/
+*.tmp
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+test*.mp4
+test*.jpg
+quick_test.py
+filtered_test.py
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment variables
+.env
+.env.local
