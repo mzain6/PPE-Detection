@@ -19,16 +19,19 @@ from central_tracking_manager import CentralTrackingManager
 CAM_CONFIG = [
     # Cam 1: Entrance camera with face recognition (WEBCAM)
     {"id": "Cam 1", "url": 0, "is_entrance": True},
-    # Cam 2: Side camera (RTSP Channel 1)
-    {"id": "Cam 2", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=1&subtype=1", "is_entrance": False},
+    # Cam 2: Side camera (RTSP Channel 1) - Password: admin@2021 (encoded as admin%402021)
+    {"id": "Cam 2", "url": "rtsp://admin:admin%402021@192.168.100.49:554/cam/realmonitor?channel=1&subtype=1", "is_entrance": False},
     # Cam 3: Side camera (RTSP Channel 5)
-    {"id": "Cam 3", "url": "rtsp://admin:ADMIN123@192.168.100.157:554/cam/realmonitor?channel=5&subtype=1", "is_entrance": False},
+    # {"id": "Cam 3", "url": "rtsp://admin:admin%402021@192.168.100.49:554/cam/realmonitor?channel=5&subtype=1", "is_entrance": False},
 ]
 
 # Paths
-HELMET_MODEL_PATH = r"C:\Users\ST\Desktop\PPE_Next_Try\Syed-PPE-main\helmet.pt"
-VEST_MODEL_PATH = r"C:\Users\ST\Desktop\PPE_Next_Try\Syed-PPE-main\vest.pt"
-FACE_DB_PATH = r"C:\Users\ST\Desktop\PPE_Next_Try\Syed-PPE-main\face_database.pkl"
+# Paths
+import os
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+HELMET_MODEL_PATH = os.path.join(BASE_DIR, "helmet.pt")
+VEST_MODEL_PATH = os.path.join(BASE_DIR, "vest.pt")
+FACE_DB_PATH = os.path.join(BASE_DIR, "face_database.pkl")
 
 # Settings
 BASE_CONF = 0.10
@@ -67,7 +70,12 @@ class CameraStream:
         if isinstance(src, int) or str(src).isdigit():
             src = int(src)
             
-        self.capture = cv2.VideoCapture(src)
+        # Use DirectShow on Windows to avoid black screen / slow connection
+        if isinstance(src, int) and os.name == 'nt':
+            self.capture = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+        else:
+            self.capture = cv2.VideoCapture(src)
+            
         # Reduce buffer size for real-time RTSP
         self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.status = self.capture.isOpened()
@@ -91,6 +99,8 @@ class CameraStream:
             try:
                 (grabbed, frame) = self.capture.read()
                 if grabbed:
+                    if np.mean(frame) < 1.0:
+                         print(f"[Warning] Cam {self.channel_id} produced black frame!")
                     self.frame = cv2.resize(frame, CAM_SIZE)
                 else:
                     self.status = False
