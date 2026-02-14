@@ -1,6 +1,6 @@
-#python app/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from app.routers import cameras, detections, stream, health, alerts
 from app.routers import ws_detections
 from app.services.worker import worker
@@ -31,6 +31,15 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+from fastapi.staticfiles import StaticFiles
+import os
+
+# Create evidence directory if it doesn't exist
+os.makedirs("evidence", exist_ok=True)
+
+# Mount evidence directory for static file access
+app.mount("/evidence", StaticFiles(directory="evidence"), name="evidence")
+
 app.include_router(health.router)
 app.include_router(cameras.router)
 app.include_router(detections.router)
@@ -53,6 +62,15 @@ def startup_event():
     # Start background worker
     worker.start()
     logger.info("PPE Detection API started successfully")
+
+@app.get("/alerts", response_class=HTMLResponse)
+async def read_alerts_dashboard():
+    """Serves the alerts dashboard."""
+    try:
+        with open("templates/alerts.html", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "<h1>Error: templates/alerts.html not found</h1>"
 
 @app.on_event("shutdown")
 def shutdown_event():

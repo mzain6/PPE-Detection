@@ -8,8 +8,12 @@ import numpy as np
 from ultralytics import YOLO
 import time
 import threading
-from collections import deque, Counter
+import threading
+from collections import deque
 import sys
+import requests
+from datetime import datetime
+import os
 
 # Import our custom modules
 from face_recognition_manager import FaceRecognitionManager
@@ -19,6 +23,7 @@ from central_tracking_manager import CentralTrackingManager
 CAM_CONFIG = [
     # Cam 1: Entrance camera with face recognition (WEBCAM)
     {"id": "Cam 1", "url": 0, "is_entrance": True},
+    # Cam 2: Side camera (RTSP Channel 1) - Password: admin@2021 (encoded as admin%402021)
     # Cam 2: Side camera (RTSP Channel 1) - Password: admin@2021 (encoded as admin%402021)
     {"id": "Cam 2", "url": "rtsp://admin:admin%402021@192.168.100.49:554/cam/realmonitor?channel=1&subtype=1", "is_entrance": False},
     # Cam 3: Side camera (RTSP Channel 5)
@@ -46,8 +51,15 @@ USE_GPU = True
 USE_FP16 = False  # Use FP32 for more GPU memory usage (2x memory = better performance)
 
 # Face recognition settings
-FACE_CHECK_INTERVAL = 5  # Check for new faces every N frames
+FACE_CHECK_INTERVAL = 5  # Check for new frames every N frames
 FACE_SIMILARITY_THRESHOLD = 0.3  # Lower threshold = more lenient matching
+
+# Violation & Evidence Settings
+VIOLATION_THRESHOLD = 10.0  # seconds
+API_ALERT_URL = "http://localhost:8000/api/ppe-alert"
+EVIDENCE_DIR = "evidence"
+if not os.path.exists(EVIDENCE_DIR):
+    os.makedirs(EVIDENCE_DIR)
 
 # Class-Specific Logic
 TARGET_CLASSES = {
@@ -63,10 +75,147 @@ PERSON_MAX_ASPECT_RATIO = 3.5  # Reduced from 4.0 (people aren't super thin)
 PERSON_MIN_ASPECT_RATIO = 1.6  # Increased from 1.2 (people are clearly taller than wide)
 
 
+class ViolationState:
+    """Tracks violation duration for a specific person to prevent flickers/duplicates"""
+    def __init__(self, person_id):
+        self.person_id = person_id
+        # {violation_type: start_time}
+        self.violation_starts = {} 
+        # Active confirmed violations
+        self.active_violations = set()
+        # Track last alert time for the PERSON (strict cooldown)
+        self.last_alert_time = 0
+        
+    def reset_cooldowns(self):
+        """Resets cooldown, allowing immediate re-alerting."""
+        self.last_alert_time = 0
+        self.active_violations.clear()
+        
+    def update(self, current_violations):
+        """
+        Updates status and returns list of NEW confirmed violations to alert.
+        current_violations: list of strings (e.g. ['NO_HELMET', 'NO_VEST'])
+        """
+        alerts = []
+        now = datetime.now()
+        timestamp = now.timestamp()
+        
+        # Check for new or continuing violations
+        newly_confirmed = []
+        
+        for v in current_violations:
+            if v not in self.violation_starts:
+                self.violation_starts[v] = now
+            
+            # Check duration
+            duration = (now - self.violation_starts[v]).total_seconds()
+            if duration >= VIOLATION_THRESHOLD:
+                if v not in self.active_violations:
+                    newly_confirmed.append(v)
+                    self.active_violations.add(v)
+
+        # Handle Cooldown & Merging
+        if newly_confirmed:
+            # Check strict person-level cooldown (10 minutes)
+            if (timestamp - self.last_alert_time) >= 600:
+                # valid alert
+                self.last_alert_time = timestamp
+                
+                # Merge into one alert if multiple
+                merged_violation = " + ".join(sorted(newly_confirmed))
+                alerts.append(merged_violation)
+            else:
+                print(f"[Cooldown] Suppressing alerts for {self.person_id}: {newly_confirmed}")
+        
+        # Check for compliance (violation ended)
+        active_types = list(self.violation_starts.keys())
+        for v in active_types:
+            if v not in current_violations:
+                # Violation ended
+                del self.violation_starts[v]
+                if v in self.active_violations:
+                    self.active_violations.remove(v)
+                    print(f"[Violation] {self.person_id} became compliant for {v}")
+                    
+        return alerts
+
+
+class ActiveRecording:
+    """Represents an active video recording session for a violation"""
+    def __init__(self, start_time, pre_frames, camera_id, person_id, violation_type, track_id):
+        self.start_time = start_time
+        # Determine strict buffer limits (prevent memory issues)
+        self.frames = list(pre_frames)[-75:] # Ensure max 2.5s pre-buffer
+        self.camera_id = camera_id
+        self.person_id = person_id
+        self.violation_type = violation_type
+        self.track_id = track_id
+        self.done = False
+        
+    def add_frame(self, frame):
+        if self.done: return
+        self.frames.append(frame)
+        
+        # Stop after 2.5 seconds
+        if (datetime.now() - self.start_time).total_seconds() >= 2.5:
+            self.done = True
+            self.save_and_alert()
+            
+    def save_and_alert(self):
+        """Save video to disk and send API alert"""
+        threading.Thread(target=self._worker).start()
+        
+    def _worker(self):
+        try:
+            timestamp_str = int(datetime.now().timestamp())
+            # Use .webm for browser compatibility
+            filename = f"violation_{self.track_id}_{self.violation_type}_{timestamp_str}.webm"
+            filepath = os.path.join(EVIDENCE_DIR, filename)
+            
+            if not self.frames:
+                print("[Error] No frames to save for violation")
+                return
+                
+            height, width, _ = self.frames[0].shape
+            
+            # Write Video
+            # Using VP80 codec for WebM (supported by Chrome/Edge)
+            out = cv2.VideoWriter(filepath, cv2.VideoWriter_fourcc(*'VP80'), 30.0, (width, height))
+            for f in self.frames:
+                out.write(f)
+            out.release()
+            
+            print(f"[Evidence] Saved {filepath}")
+            
+            # Send Alert to API
+            video_link = f"http://localhost:8000/evidence/{filename}"
+            payload = {
+                "track_id": int(self.track_id) if isinstance(self.track_id, (int, float)) else 0,
+                "person_id": str(self.person_id), # Send Person Name
+                "timestamp": datetime.now().isoformat(),
+                "camera_id": str(self.camera_id),
+                "violation_type": self.violation_type,
+                "video_link": video_link,
+                "screenshot_path": "" 
+            }
+            
+            response = requests.post(API_ALERT_URL, json=payload, timeout=5)
+            if response.status_code == 200:
+                print(f"[Alert] Successfully sent to API: {self.violation_type}")
+            else:
+                print(f"[Alert] API returned {response.status_code}: {response.text}")
+                
+        except Exception as e:
+            print(f"[Error] Recording worker failed: {e}")
+
+
+
+
 class CameraStream:
     """Threaded camera capture to prevent blocking."""
-    def __init__(self, src, channel_id):
+    def __init__(self, src, channel_id, buffer_len=75):
         self.channel_id = channel_id
+        self.frame_buffer = deque(maxlen=buffer_len) # ~2.5s @ 30fps
         if isinstance(src, int) or str(src).isdigit():
             src = int(src)
             
@@ -102,6 +251,7 @@ class CameraStream:
                     if np.mean(frame) < 1.0:
                          print(f"[Warning] Cam {self.channel_id} produced black frame!")
                     self.frame = cv2.resize(frame, CAM_SIZE)
+                    self.frame_buffer.append(self.frame)
                 else:
                     self.status = False
             except Exception as e:
@@ -204,12 +354,39 @@ def main():
     # Cache for PPE detections during frame skipping
     # {cam_idx: [(box, track_id, class_name, conf), ...]}
     last_ppe_detections = {}
+    
+    # Violation Tracking
+    # Key: (cam_idx, person_id) -> ViolationState
+    violation_states = {}
+    active_recordings = []
+    
+    # Cooldown Sync
+    last_reset_check = time.time()
+    last_known_clear_time = 0.0
 
     print("Starting Multi-Cam Inference with Face Tracking. Press 'Q' to quit.")
 
     while True:
-        frame_count += 1
-        
+        # --- SYNC WITH BACKEND (Periodically check if history was cleared) ---
+        if time.time() - last_reset_check > 5.0: # Check every 5s
+            last_reset_check = time.time()
+            try:
+                # Use a short timeout to not block main loop
+                resp = requests.get(f"{API_ALERT_URL}s/status", timeout=0.5) 
+                if resp.status_code == 200:
+                    data = resp.json()
+                    server_clear_time = data.get("last_cleared", 0.0)
+                    
+                    if server_clear_time > last_known_clear_time:
+                        print(f"[Sync] History cleared on server ({server_clear_time}). Resetting local cooldowns.")
+                        last_known_clear_time = server_clear_time
+                        # Reset all violation states
+                        for vs in violation_states.values():
+                            vs.reset_cooldowns()
+            except Exception:
+                # Ignore connection errors (server might be down/busy)
+                pass # print("[Sync] Failed to check status")
+
         # Grab Frames
         frames = [cam.read() for cam in cams]
         processed_frames = []
@@ -607,6 +784,160 @@ def main():
                                     face_embedding=None,
                                     bbox=bbox
                                 )
+
+            # --- VIOLATION LOGIC START ---
+            # --- VIOLATION LOGIC START ---
+            # 1. Map ALL PPE (Positive & Negative) to Person IDs
+            person_ppe_map = {} # {person_id: set([Safety Vest, NO-Safety Vest, ...])}
+            
+            for (box, track_id, class_name, conf) in all_detections:
+                # Find owner person
+                owner_pid = None
+                
+                if track_id != -1 and (cam_idx, track_id) in tracker_person_map:
+                    owner_pid = tracker_person_map[(cam_idx, track_id)]
+                else:
+                    # Spatial check against tracked persons
+                    cx = (box[0] + box[2]) / 2
+                    cy = (box[1] + box[3]) / 2
+                    
+                    for tid, pbox in tracked_persons.items():
+                        px1, py1, px2, py2 = pbox
+                        if px1 < cx < px2 and py1 < cy < py2:
+                            # Overlap found
+                            owner_pid = tracker_person_map.get((cam_idx, tid))
+                            break
+                
+                if owner_pid:
+                    if owner_pid == "???": continue
+                    if owner_pid not in person_ppe_map:
+                        person_ppe_map[owner_pid] = set()
+                    person_ppe_map[owner_pid].add(class_name)
+
+            # 2. Resolve Conflicts & Determine Violations
+            current_frame_violations = {} # {person_id: [confimed_violations]}
+            
+            for pid, items in person_ppe_map.items():
+                # Conflict Resolution: Positive overrides Negative
+                if 'Safety Vest' in items and 'NO-Safety Vest' in items:
+                    items.remove('NO-Safety Vest')
+                if 'Hardhat' in items and 'NO-Hardhat' in items:
+                    items.remove('NO-Hardhat')
+                    
+                # Collect remaining violations
+                violations = [x for x in items if 'NO-' in x]
+                if violations:
+                    current_frame_violations[pid] = violations
+            
+            # 2. Update Violation States
+            # Iterate all confirmed people on this camera
+            active_pids = set()
+            for tid in tracked_persons:
+                pid = tracker_person_map.get((cam_idx, tid))
+                if pid: active_pids.add(pid)
+                
+            for pid in active_pids:
+                if pid == "???": continue
+                
+                # Get state or create new
+                state_key = (cam_idx, pid)
+                if state_key not in violation_states:
+                    violation_states[state_key] = ViolationState(pid)
+                
+                violations = list(current_frame_violations.get(pid, []))
+                
+                # Update state
+                new_alerts = violation_states[state_key].update(violations)
+                
+                # 3. Trigger Recordings
+                for alert_v in new_alerts:
+                    print(f"🚨 TRIGGER VIOLATION: {pid} - {alert_v} (Cam {cam_idx})")
+                    
+                    # Find track_id for filename
+                    pid_tid = "unknown"
+                    for tid, p in tracker_person_map.items():
+                         if p == pid and tid[0] == cam_idx:
+                             pid_tid = tid[1]
+                             break
+                    
+                    # Fix: Use cams[cam_idx] instead of 'cam' variable from outer scope
+                    current_cam = cams[cam_idx]
+                    
+                    rec = ActiveRecording(
+                        start_time=datetime.now(),
+                        pre_frames=current_cam.frame_buffer,
+                        camera_id=camera_id,
+                        person_id=pid,
+                        violation_type=alert_v,
+                        track_id=pid_tid
+                    )
+                    active_recordings.append(rec)
+
+            # 4. Feed Frames to Recorders
+            active_recordings = [r for r in active_recordings if not r.done]
+            for rec in active_recordings:
+                if str(rec.camera_id) == str(camera_id):
+                    rec.add_frame(frame)
+            
+            # --- FILTER VISUAL DETECTIONS (Remove Conflicts) ---
+            # Apply same logic to prevent drawing conflicting boxes
+            filtered_detections = []
+            person_has_positive = {} # {person_id: set(['Hardhat', 'Safety Vest'])}
+            
+            # First pass: identify positive detections per person
+            for (box, track_id, class_name, conf) in all_detections:
+                if class_name in ['Safety Vest', 'Hardhat']:
+                    # Find owner
+                    owner_pid = None
+                    if track_id != -1 and (cam_idx, track_id) in tracker_person_map:
+                        owner_pid = tracker_person_map[(cam_idx, track_id)]
+                    else:
+                        cx = (box[0] + box[2]) / 2
+                        cy = (box[1] + box[3]) / 2
+                        for tid, pbox in tracked_persons.items():
+                            px1, py1, px2, py2 = pbox
+                            if px1 < cx < px2 and py1 < cy < py2:
+                                owner_pid = tracker_person_map.get((cam_idx, tid))
+                                break
+                    
+                    if owner_pid and owner_pid != "???":
+                        if owner_pid not in person_has_positive:
+                            person_has_positive[owner_pid] = set()
+                        person_has_positive[owner_pid].add(class_name)
+            
+            # Second pass: filter out conflicting negatives
+            for detection in all_detections:
+                box, track_id, class_name, conf = detection
+                should_keep = True
+                
+                if class_name in ['NO-Safety Vest', 'NO-Hardhat']:
+                    # Find owner
+                    owner_pid = None
+                    if track_id != -1 and (cam_idx, track_id) in tracker_person_map:
+                        owner_pid = tracker_person_map[(cam_idx, track_id)]
+                    else:
+                        cx = (box[0] + box[2]) / 2
+                        cy = (box[1] + box[3]) / 2
+                        for tid, pbox in tracked_persons.items():
+                            px1, py1, px2, py2 = pbox
+                            if px1 < cx < px2 and py1 < cy < py2:
+                                owner_pid = tracker_person_map.get((cam_idx, tid))
+                                break
+                    
+                    if owner_pid and owner_pid in person_has_positive:
+                        # Check for conflict
+                        if class_name == 'NO-Safety Vest' and 'Safety Vest' in person_has_positive[owner_pid]:
+                            should_keep = False
+                        elif class_name == 'NO-Hardhat' and 'Hardhat' in person_has_positive[owner_pid]:
+                            should_keep = False
+                
+                if should_keep:
+                    filtered_detections.append(detection)
+            
+            # Use filtered list for drawing
+            all_detections = filtered_detections
+            
+            # --- VIOLATION LOGIC END ---
 
             # --- DRAW PERSISTENT PERSON ID BOXES ---
             # Draw Person ID box at HEAD LEVEL for each tracked person (like a face box)

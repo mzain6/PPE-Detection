@@ -17,16 +17,18 @@ router = APIRouter(prefix="/api", tags=["alerts"])
 class PPEAlert(BaseModel):
     """PPE violation alert model"""
     track_id: int
+    person_id: str = "Unknown"  # Added person ID
     timestamp: str
     camera_id: str
     violation_type: str  # NO_HELMET, NO_VEST, NO_BOTH
     screenshot_path: str = None  # Path to violation screenshot
+    video_link: str = None  # Link to violation video evidence
 
 
 # In-memory storage for demo purposes
 # In production, store in database
 alert_history: List[PPEAlert] = []
-
+last_history_clear_time = 0.0
 
 @router.post("/ppe-alert")
 async def receive_ppe_alert(alert: PPEAlert):
@@ -39,7 +41,7 @@ async def receive_ppe_alert(alert: PPEAlert):
     Returns:
         Success confirmation
     """
-    logger.warning(f"🚨 PPE VIOLATION ALERT - Track {alert.track_id} - {alert.violation_type} - Camera: {alert.camera_id} - Time: {alert.timestamp}")
+    logger.warning(f"🚨 PPE VIOLATION ALERT - Person: {alert.person_id} (Track {alert.track_id}) - {alert.violation_type} - Camera: {alert.camera_id} - Time: {alert.timestamp}")
     
     # Store alert
     alert_history.append(alert)
@@ -89,6 +91,15 @@ async def get_alert_stats():
     
     return stats
 
+@router.get("/ppe-alerts/status")
+async def get_alert_status():
+    """
+    Get status of alerts (e.g., last cleared time).
+    Used by tracker to reset cooldowns.
+    """
+    return {
+        "last_cleared": last_history_clear_time
+    }
 
 @router.delete("/ppe-alerts/clear")
 async def clear_alerts():
@@ -98,13 +109,15 @@ async def clear_alerts():
     Returns:
         Confirmation message
     """
-    global alert_history
+    global alert_history, last_history_clear_time
     count = len(alert_history)
     alert_history.clear()
-    logger.info(f"Cleared {count} alerts from history")
+    last_history_clear_time = datetime.now().timestamp()
+    logger.info(f"Cleared {count} alerts from history at {last_history_clear_time}")
     
     return {
         "status": "success",
         "message": f"Cleared {count} alerts",
-        "remaining": 0
+        "remaining": 0,
+        "cleared_at": last_history_clear_time
     }
