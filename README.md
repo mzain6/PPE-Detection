@@ -1,257 +1,114 @@
-# PPE Detection System
+# PPE Detection System - SafeSite AI
 
-Enterprise-ready PPE (Personal Protective Equipment) Detection API using YOLOv8 for real-time helmet and safety vest detection.
+A real-time Personal Protective Equipment (PPE) detection system using YOLOv8, capable of detecting safety vests and helmets, performing face recognition for authorized personnel, and tracking violations across multiple cameras.
 
-## Features
-
-- **Real-time Detection**: Person, helmet, and safety vest detection using custom-trained YOLOv8 model
-- **GPU Acceleration**: NVIDIA CUDA support with automatic CPU fallback
-- **Multi-stream Support**: Handle multiple RTSP streams and webcams simultaneously
-- **Tracking**: Persistent person tracking across frames with unique IDs
-- **RESTful API**: FastAPI-based backend with comprehensive endpoints
-- **WebSocket Support**: Real-time detection streaming
-- **Health Monitoring**: System health checks including GPU, memory, and camera status
-
-## Technology Stack
-
-* **Python 3.8+**
-* **PyTorch** (with CUDA support for GPU acceleration)
-* **Ultralytics YOLOv8**
-* **FastAPI** (REST API framework)
-* **OpenCV** (Video processing)
+## 🚀 Features
+- **Multi-Camera Support**: Simultaneous processing of webcam and RTSP streams.
+- **PPE Detection**: Real-time detection of Hardhats and Safety Vests.
+- **Face Recognition**: Identifies authorized personnel at entrance cameras.
+- **Violation Logic**: Tracks "No Helmet" and "No Vest" violations with persistence.
+- **Alert System**: Sends violation alerts to a central server and dashboard.
+- **Evidence Recording**: Automatically records video clips of violations.
 
 ---
 
-## System Requirements
+## 🛠️ System Setup (New Machine)
 
-### Minimum Requirements
-- Python 3.8 or newer
-- 4 GB RAM
-- CPU: Multi-core processor
+Follow these steps to set up the system on a fresh machine.
 
-### Recommended for GPU Acceleration
-- NVIDIA GPU with CUDA support (6+ GB VRAM)
-- CUDA Toolkit 11.8+
-- 8 GB+ RAM
+### 1. Prerequisites
+- Python 3.8+
+- NVIDIA GPU (Recommended) with CUDA installed.
+- **Operating System**: Windows / Linux
+
+### 2. Clone & Install Dependencies
+Open a terminal in the project folder (e.g., `C:\Users\Username\Downloads\PPE`) and run:
+
+```bash
+# Install PyTorch with CUDA (adjust command for your CUDA version if needed)
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# Install other requirements
+pip install ultralytics opencv-python numpy requests fastapi uvicorn python-multipart jinja2
+```
+
+### 3. Verify Model Files
+Ensure the following model files are present in the project root:
+- `helmet.pt`
+- `vest.pt`
+- `yolov8n.pt`
+- `best.pt` (for server-side simple detection)
 
 ---
 
-## Getting Started
+## 🖥️ Running the Server (Backend & Dashboard)
 
-### 1. Clone or Download the Project
+The server handles incoming alerts from the camera script and hosts the dashboard.
 
-```bash
-cd PPE-Detection
-```
-
-### 2. Create and Activate Virtual Environment
+**1. Start the Server:**
+Run this command from the project root:
 
 ```bash
-# For Windows
-python -m venv venv
-.\venv\Scripts\activate
-
-# For macOS/Linux
-python3 -m venv venv
-source venv/bin/activate
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 3. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-**Note**: For GPU support, ensure you have CUDA-enabled PyTorch installed:
-```bash
-# Check CUDA availability
-python -c "import torch; print(f'CUDA Available: {torch.cuda.is_available()}')"
-```
-
-### 4. Verify Model File
-
-Ensure the custom PPE model is present:
-```bash
-# Should see ppe_model.pt in the project root
-ls ppe_model.pt
-```
-
-### 5. Start the API Server
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-The API will be available at:
-- **API Docs**: http://localhost:8000/docs
-- **Health Check**: http://localhost:8000/health/
+**2. Access Dashboards:**
+- **Alerts Dashboard**: [http://localhost:8000/alerts](http://localhost:8000/alerts) (Real-time violation log)
+- **API Documentation**: [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ---
 
-## Usage
+## 📹 Running the Detection System (Cameras)
 
-### API Documentation
+The main script (`run_cameras_with_face_tracking.py`) connects to cameras, runs AI inference, and sends alerts to the server.
 
-Access the interactive API documentation at `http://localhost:8000/docs`
-
-### Key Endpoints
-
-- `GET /health/` - System health status
-- `GET /health/gpu` - GPU information
-- `POST /cameras/register` - Register a camera stream
-- `GET /cameras/` - List all cameras
-- `GET /detections/` - Get latest detections
-- `GET /stream/{camera_id}` - Live video stream with detections
-
-### Example: Register a Camera
+### 1. Configure Cameras
+Open `run_cameras_with_face_tracking.py` and submit your camera details in the `CAM_CONFIG` section:
 
 ```python
-import requests
-
-response = requests.post("http://localhost:8000/cameras/register", json={
-    "camera_id": "warehouse_cam_01",
-    "rtsp_url": "rtsp://192.168.1.100:554/stream",
-    "fps": 15
-})
+CAM_CONFIG = [
+    # Cam 1: Webcam (Index 0) - Entrance
+    {"id": "Cam 1", "url": 0, "is_entrance": True},
+    
+    # Cam 2: RTSP Camera
+    # Format: rtsp://username:password@IP:Port/path
+    # Note: Encode special chars in password (@ -> %40)
+    {"id": "Cam 2", "url": "rtsp://admin:pass%40123@192.168.1.50:554/stream", "is_entrance": False},
+]
 ```
 
-### Example: Get Detections
+### 2. Run the Script
+Execute the script using Python:
 
-```python
-response = requests.get("http://localhost:8000/detections/")
-detections = response.json()
+```bash
+python run_cameras_with_face_tracking.py
 ```
+
+### Key Controls
+- **Q**: Quit the application.
+- **Console Output**: Shows detection logs and API connection status.
 
 ---
 
-## Testing
+## 📂 Video File Processing
+To run detection on a pre-recorded video file instead of live cameras:
 
-### Run All Tests
-
-```bash
-pytest tests/ -v
-```
-
-### Run with Coverage
-
-```bash
-pytest tests/ -v --cov=app --cov-report=html
-```
-
-### Run GPU Tests (requires NVIDIA GPU)
-
-```bash
-pytest tests/ -v -m gpu
-```
-
-### Run Stability Test
-
-```bash
-python tests/stability_check.py
-```
-
----
-
-## Validation & Benchmarking
-
-### Validate Detection with Webcam
-
-```bash
-python scripts/validate_detections.py --source 0 --display
-```
-
-### Validate with RTSP Stream
-
-```bash
-python scripts/validate_detections.py --source "rtsp://example.com/stream" --display
-```
-
-### Performance Benchmark
-
-```bash
-python scripts/benchmark_performance.py --frames 100 --resolution 1920x1080
-```
-
----
-
-## Model Performance
-
-The custom PPE model was trained on the "PPE Detection v3" dataset from Roboflow.
-
-| Class | Precision | Recall | mAP50 | mAP50-95 |
-|:------|:----------|:-------|:------|:---------|
-| **Overall** | 0.72 | 0.715 | 0.735 | 0.456 |
-| **Helmet** | 0.784 | 0.824 | 0.866 | 0.584 |
-| **Vest** | 0.841 | 0.897 | 0.935 | 0.705 |
-
----
-
-## Configuration
-
-Edit `config.yaml` to customize:
-
-- Model path and parameters
-- Confidence thresholds
-- Tracking parameters
-- Camera settings
-- API configuration
-
----
-
-## Troubleshooting
-
-### GPU Not Detected
-
-1. Verify CUDA installation:
+1. Place your video file in the project folder (e.g., `video.mp4`).
+2. Run the video processing script:
    ```bash
-   nvidia-smi
+   python videorunning.py
    ```
-
-2. Check PyTorch CUDA support:
-   ```bash
-   python -c "import torch; print(torch.cuda.is_available())"
-   ```
-
-3. Reinstall PyTorch with CUDA:
-   ```bash
-   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-   ```
-
-### Camera Connection Issues
-
-- Verify RTSP URL is accessible
-- Check network connectivity
-- Ensure ffmpeg is installed for RTSP streams
-- Review logs for detailed error messages
-
-### Low FPS
-
-- Enable GPU acceleration
-- Reduce input resolution in config
-- Decrease FPS setting for cameras
-- Close unnecessary applications
+   *(Note: Edit `videorunning.py` to point to your specific video filename)*
 
 ---
 
-## Phase 1 Improvements
+## 📁 Directory Structure
+- **`app/`**: Backend server code (FastAPI).
+- **`evidence/`**: Saved violation video clips (auto-generated).
+- **`output_videos/`**: Processed video outputs.
+- **`templates/`**: HTML dashboards.
 
-✅ **Completed Stabilization Work**:
-- Removed legacy code and consolidated codebase
-- Added GPU utilities with CUDA detection and memory monitoring
-- Implemented comprehensive health check endpoints
-- Created test infrastructure (pytest, GPU tests, API tests)
-- Added validation and benchmarking scripts
-- Improved error handling and logging
-- Updated configuration for custom PPE model
-
----
-
-## License
-
-This project is for demonstration and evaluation purposes.
-
----
-
-## Support
-
-For issues or questions, please check the API documentation at `/docs` or review the logs for detailed error messages.
+## ❓ Troubleshooting
+- **Server Connection Failed**: Ensure the server is running on port 8000 *before* starting the camera script.
+- **CUDA/GPU Error**: Verify NVIDIA drivers and PyTorch CUDA installation (`import torch; print(torch.cuda.is_available())`).
+- **RTSP Lag**: Switch to TCP transport in OpenCV or check network bandwidth.
