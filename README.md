@@ -56,6 +56,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - **Alerts Dashboard**: [http://localhost:8000/alerts](http://localhost:8000/alerts) (Real-time violation log)
 - **API Documentation**: [http://localhost:8000/docs](http://localhost:8000/docs)
 
+### API Reference (Backend Endpoints)
+You can fetch data from these local endpoints:
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `http://localhost:8000/api/ppe-alerts` | GET | List recent violation alerts (JSON) |
+| `http://localhost:8000/api/ppe-alerts/stats` | GET | Violation statistics counts (JSON) |
+| `http://localhost:8000/health` | GET | System health status |
+| `http://localhost:8000/docs` | - | interactive Swagger UI to test all endpoints |
+
+
 ---
 
 ## 📹 Running the Detection System (Cameras)
