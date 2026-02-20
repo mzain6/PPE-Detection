@@ -14,20 +14,67 @@ import sys
 import requests
 from datetime import datetime
 import os
+import json
 
 # Import our custom modules
 from face_recognition_manager import FaceRecognitionManager
 from central_tracking_manager import CentralTrackingManager
 
+# ─── Access Control Manager ───────────────────────────────────────────────────
+class AccessControlManager:
+    """Loads permissions.json and checks if a GlobalID is allowed on a camera."""
+    PERMISSIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'permissions.json')
+
+    def __init__(self):
+        self.permissions = {}
+        self.camera_rules = {}
+        self._load()
+
+    def _load(self):
+        try:
+            with open(self.PERMISSIONS_PATH, 'r') as f:
+                data = json.load(f)
+            self.permissions  = data.get('persons', {})
+            self.camera_rules = data.get('cameras', {})
+            print(f"[AccessControl] Loaded {len(self.permissions)} persons, {len(self.camera_rules)} camera rules")
+        except Exception as e:
+            print(f"[AccessControl] WARNING: Could not load permissions.json: {e}")
+
+    def is_allowed(self, person_id: str, camera_id: str) -> bool:
+        """Returns True if person_id is allowed in camera_id, False otherwise."""
+        if not person_id or person_id in ("???", None):
+            return False
+        cam_rule = self.camera_rules.get(camera_id, {})
+        zone_type = cam_rule.get('zone_type', 'allowed_all')
+        allowed_ids = cam_rule.get('allowed_ids', [])
+
+        if zone_type == 'allowed_all':
+            return True                           # entrance — everyone welcome
+        elif zone_type == 'restricted_all':
+            return person_id in allowed_ids       # nobody unless explicitly listed
+        elif zone_type == 'allowed_whitelist':
+            return person_id in allowed_ids       # only listed IDs
+        return True
+
+    def get_zone_type(self, camera_id: str) -> str:
+        return self.camera_rules.get(camera_id, {}).get('zone_type', 'allowed_all')
+# ─────────────────────────────────────────────────────────────────────────────
+
 # --- CONFIGURATION ---
+# Camera brand detection:
+#   Dahua  → rtsp://user:pass@ip/cam/realmonitor?channel=N&subtype=1  (direct OpenCV)
+#   YooSee → requires VLC proxy (MJPEG over HTTP)
 CAM_CONFIG = [
-    # Cam 1: Entrance camera with face recognition (WEBCAM)
-    {"id": "Cam 1", "url": 0, "is_entrance": True},
-    # Cam 2: Side camera (RTSP Channel 1) - Password: admin@2021 (encoded as admin%402021)
-    # Cam 2: Side camera (RTSP Channel 1) - Password: admin@2021 (encoded as admin%402021)
-    {"id": "Cam 2", "url": "rtsp://admin:admin%402021@192.168.100.49:554/cam/realmonitor?channel=1&subtype=1", "is_entrance": False},
-    # Cam 3: Side camera (RTSP Channel 5)
-    # {"id": "Cam 3", "url": "rtsp://admin:admin%402021@192.168.100.49:554/cam/realmonitor?channel=5&subtype=1", "is_entrance": False},
+    # Cam 1: Entrance camera — webcam, face recognition runs here
+    {"id": "Cam 1", "url": 0, "is_entrance": True,  "brand": "webcam"},
+    # Cam 2: RTSP Channel 1 — RESTRICTED ZONE (Dahua, direct)
+    {"id": "Cam 2",
+     "url": "rtsp://admin:ADMIN123@192.168.100.158:554/cam/realmonitor?channel=1&subtype=1",
+     "is_entrance": False, "brand": "dahua"},
+    # Cam 3: RTSP Channel 5 — ALLOWED ZONE for Person 1 (Dahua, direct)
+    {"id": "Cam 3",
+     "url": "rtsp://admin:ADMIN123@192.168.100.158:554/cam/realmonitor?channel=5&subtype=1",
+     "is_entrance": False, "brand": "dahua"},
 ]
 
 # Paths
@@ -35,7 +82,7 @@ CAM_CONFIG = [
 import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HELMET_MODEL_PATH = os.path.join(BASE_DIR, "helmet.pt")
-VEST_MODEL_PATH = os.path.join(BASE_DIR, "vest.pt")
+VEST_MODEL_PATH = os.path.join(BASE_DIR, "yolov8_vest_small.pt")
 FACE_DB_PATH = os.path.join(BASE_DIR, "face_database.pkl")
 
 # Settings
@@ -46,9 +93,12 @@ INFERENCE_IMGSZ = 640  # Increased from 480 for better GPU utilization
 IOU_THRESHOLD = 0.5
 SMOOTHING_FACTOR = 0.4
 
-# GPU Optimization - Maximize memory usage for speed
-USE_GPU = True
-USE_FP16 = False  # Use FP32 for more GPU memory usage (2x memory = better performance)
+# GPU Optimization
+import torch
+USE_GPU = torch.cuda.is_available()
+USE_FP16 = False
+DEVICE = 0 if USE_GPU else 'cpu'
+print(f"[Device] Using {'GPU (CUDA)' if USE_GPU else 'CPU'}")
 
 # Face recognition settings
 FACE_CHECK_INTERVAL = 5  # Check for new frames every N frames
@@ -278,10 +328,29 @@ def get_target_class_ids(model, specific_labels):
     return ids
 
 
+def draw_restricted_alert(frame, camera_id, person_id, person_name):
+    """Draw a red RESTRICTED ZONE alert overlay on the frame."""
+    h, w = frame.shape[:2]
+    # Semi-transparent red overlay on top strip
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, 60), (0, 0, 180), -1)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+    # Bold alert text
+    label = f"🚨 RESTRICTED ZONE — {person_name or person_id} UNAUTHORIZED"
+    cv2.putText(frame, label, (10, 42),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+    # Red border
+    cv2.rectangle(frame, (0, 0), (w-1, h-1), (0, 0, 220), 4)
+    return frame
+
+
 def main():
     # Initialize Central Tracking Manager
     print("Initializing Central Tracking Manager...")
     central_manager = CentralTrackingManager()
+
+    # Initialize Access Control Manager
+    access_control = AccessControlManager()
     
     # Initialize Face Recognition (only if entrance camera exists)
     face_manager = None
@@ -321,7 +390,9 @@ def main():
 
     # Update: Include classes from new helmet.pt model ('head', 'helmet', 'hi-viz helmet')
     helmet_ids = get_target_class_ids(model_helmet, ['Hardhat', 'NO-Hardhat', 'head', 'helmet', 'hi-viz helmet'])
-    vest_ids = get_target_class_ids(model_vest, ['Safety Vest', 'NO-Safety Vest'])
+    # yolov8_vest_small.pt class 2 = 'vest' (only vest class needed; skip helmet/gloves/boots etc.)
+    vest_ids = get_target_class_ids(model_vest, ['vest'])
+    print(f"[VestModel] Using class IDs: {vest_ids} from {model_vest.names}")
 
     # Start Camera Streams
     cams = []
@@ -473,8 +544,16 @@ def main():
                             confs = result.boxes.conf.cpu().numpy()
                             for b, tid, c, cf in zip(boxes, ids, clss, confs):
                                 c_name = model.names[c]
+                                # Remap helmet model class names
                                 if c_name in ['helmet', 'hi-viz helmet']: c_name = 'Hardhat'
                                 elif c_name == 'head': c_name = 'NO-Hardhat'
+                                # Remap vest model class names (yolov8_vest_small.pt)
+                                elif c_name == 'vest': c_name = 'Safety Vest'
+                                # Skip non-vest PPE from vest model (gloves, boots, helmet etc.)
+                                elif c_name in ['gloves', 'boots', 'goggles', 'none', 'Person',
+                                                'no_helmet', 'no_goggle', 'no_gloves', 'no_boots',
+                                                'no-helmet', 'no-gloves', 'no-boots', 'no-goggle']:
+                                    continue
                                 all_detections.append((b, tid, c_name, cf))
                         elif result.boxes.xyxy is not None:
                             # Untracked detections
@@ -485,6 +564,12 @@ def main():
                                 c_name = model.names[c]
                                 if c_name in ['helmet', 'hi-viz helmet']: c_name = 'Hardhat'
                                 elif c_name == 'head': c_name = 'NO-Hardhat'
+                                # Remap vest model class names (yolov8_vest_small.pt)
+                                elif c_name == 'vest': c_name = 'Safety Vest'
+                                elif c_name in ['gloves', 'boots', 'goggles', 'none', 'Person',
+                                                'no_helmet', 'no_goggle', 'no_gloves', 'no_boots',
+                                                'no-helmet', 'no-gloves', 'no-boots', 'no-goggle']:
+                                    continue
                                 all_detections.append((b, -1, c_name, cf))
                 
                 # 3. PROXY TRACKER CREATION (Fallback for missing people)
@@ -938,6 +1023,34 @@ def main():
             all_detections = filtered_detections
             
             # --- VIOLATION LOGIC END ---
+
+            # ─── RESTRICTED AREA CHECK ──────────────────────────────────────────
+            # Only check on non-entrance cameras that have a restriction
+            zone_type = access_control.get_zone_type(camera_id)
+            if not is_entrance and zone_type in ('restricted_all', 'allowed_whitelist'):
+                for tid, p_bbox in tracked_persons.items():
+                    pid = tracker_person_map.get((cam_idx, tid))
+                    if not pid or pid == "???": continue
+
+                    if not access_control.is_allowed(pid, camera_id):
+                        # Person is NOT allowed here — draw alert
+                        person_name = None
+                        if pid in access_control.permissions:
+                            person_name = access_control.permissions[pid].get('name', pid)
+                        frame = draw_restricted_alert(frame, camera_id, pid, person_name)
+                        # Red box around the specific person
+                        rx1, ry1, rx2, ry2 = [int(v) for v in p_bbox]
+                        cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 0, 220), 3)
+                        cv2.putText(frame, f"UNAUTHORIZED: {pid}", (rx1, ry1 - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 220), 2)
+                        print(f"[AccessControl] 🚨 ALERT: {pid} in RESTRICTED {camera_id}")
+                    else:
+                        # Person is allowed — show green ACCESS OK tag
+                        rx1, ry1, rx2, ry2 = [int(v) for v in p_bbox]
+                        cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 200, 0), 2)
+                        cv2.putText(frame, f"AUTHORIZED: {pid}", (rx1, ry1 - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
+            # ────────────────────────────────────────────────────────────────────
 
             # --- DRAW PERSISTENT PERSON ID BOXES ---
             # Draw Person ID box at HEAD LEVEL for each tracked person (like a face box)
