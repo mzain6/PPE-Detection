@@ -1,18 +1,29 @@
 # Global configuration for PPE Detection System
 
 model:
-  path: "yolov8n.pt"  # Using standard YOLO with person class (class 0)
-  input_size: 320  # Reduced for better CPU performance (was 640)
-  device: "auto"  # "cpu", "cuda", or "auto" - auto will use GPU if available
-  conf_threshold: 0.25  # Confidence threshold for detections
-  iou_threshold: 0.45  # NMS IoU threshold
+  path: "yolov8n.pt"  # Standard YOLO for Person & Vehicle Detection
   
-  # Class IDs for custom PPE model
-  # Note: These match the actual model class IDs
+  # Custom Model Paths
+  models:
+    helmet: "helmet.pt"
+    vest: "yolov8_vest_medium.pt"  # UPDATED: New medium model
+    face: "yolov8m-face-lindevs.pt"
+
+  input_size: 320
+  device: "auto"
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+  
+  # Class IDs
   classes:
-    person: 14
-    helmet: 12  # head_helmet in model
-    vest: 16
+    person: 0       # COCO ID for Person
+    car: 2          # COCO ID for Car
+    motorcycle: 3   # COCO ID for Motorcycle
+    bus: 5          # COCO ID for Bus
+    truck: 7        # COCO ID for Truck
+    forklift: -1    # Custom class (if available in vest model)
+    helmet: 12      # head_helmet
+    vest: 16        # vest (check if this ID matches new medium model)
 
 tracking:
   iou_threshold: 0.5  # Increased from 0.3 - higher = more strict matching, prevents ID switching
