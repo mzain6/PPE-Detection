@@ -106,7 +106,7 @@ FACE_SIMILARITY_THRESHOLD = 0.3  # Lower threshold = more lenient matching
 
 # Violation & Evidence Settings
 VIOLATION_THRESHOLD = 10.0  # seconds
-API_ALERT_URL = "http://localhost:8000/api/ppe-alert"
+API_ALERT_URL = "http://localhost:8001/api/ppe-alert"
 EVIDENCE_DIR = "evidence"
 if not os.path.exists(EVIDENCE_DIR):
     os.makedirs(EVIDENCE_DIR)
@@ -123,6 +123,16 @@ TARGET_CLASSES = {
 PERSON_MIN_AREA = 3500  # Increased from 2500 -> 3500 to filter small objects
 PERSON_MAX_ASPECT_RATIO = 3.5  # Reduced from 4.0 (people aren't super thin)
 PERSON_MIN_ASPECT_RATIO = 1.6  # Increased from 1.2 (people are clearly taller than wide)
+
+# Sub-Area Restricted Zones (Custom Polygons)
+# Maps camera_id -> list of polygons (each a numpy array of points for cv2.pointPolygonTest)
+# The coordinates here are for a 640x360 frame
+RESTRICTED_ZONES = {
+    "Cam 2": [
+        # Shifted left and down significantly to lay flat on the grass
+        np.array([[220, 260], [380, 200], [500, 280], [340, 340]], np.int32)
+    ]
+}
 
 
 class ViolationState:
@@ -157,19 +167,28 @@ class ViolationState:
             if v not in self.violation_starts:
                 self.violation_starts[v] = now
             
-            # Check duration
+            # Check duration - drastically shorter for restricted areas
+            threshold = 0.5 if v == "RESTRICTED_AREA_INTRUSION" else VIOLATION_THRESHOLD
             duration = (now - self.violation_starts[v]).total_seconds()
-            if duration >= VIOLATION_THRESHOLD:
+            
+            if duration >= threshold:
                 if v not in self.active_violations:
                     newly_confirmed.append(v)
                     self.active_violations.add(v)
 
         # Handle Cooldown & Merging
         if newly_confirmed:
+            # Check if this is a high-priority alert that ignores the general cooldown
+            is_high_priority = "RESTRICTED_AREA_INTRUSION" in newly_confirmed
+            
             # Check strict person-level cooldown (10 minutes)
-            if (timestamp - self.last_alert_time) >= 600:
+            if is_high_priority or (timestamp - self.last_alert_time) >= 600:
                 # valid alert
-                self.last_alert_time = timestamp
+                if not is_high_priority:
+                    self.last_alert_time = timestamp
+                else:
+                    # For restricted areas, we might want a shorter specific cooldown if needed, but for testing we bypass
+                    pass
                 
                 # Merge into one alert if multiple
                 merged_violation = " + ".join(sorted(newly_confirmed))
@@ -206,8 +225,8 @@ class ActiveRecording:
         if self.done: return
         self.frames.append(frame)
         
-        # Stop after 2.5 seconds
-        if (datetime.now() - self.start_time).total_seconds() >= 2.5:
+        # Stop after 3.0 seconds (extended to capture full fall + aftermath)
+        if (datetime.now() - self.start_time).total_seconds() >= 3.0:
             self.done = True
             self.save_and_alert()
             
@@ -238,7 +257,7 @@ class ActiveRecording:
             print(f"[Evidence] Saved {filepath}")
             
             # Send Alert to API
-            video_link = f"http://localhost:8000/evidence/{filename}"
+            video_link = f"http://localhost:8001/evidence/{filename}"
             payload = {
                 "track_id": int(self.track_id) if isinstance(self.track_id, (int, float)) else 0,
                 "person_id": str(self.person_id), # Send Person Name
@@ -269,9 +288,13 @@ class CameraStream:
         if isinstance(src, int) or str(src).isdigit():
             src = int(src)
             
-        # Use DirectShow on Windows to avoid black screen / slow connection
+        # Use DirectShow on Windows to avoid black screen / slow connection for Webcams
         if isinstance(src, int) and os.name == 'nt':
             self.capture = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+        elif isinstance(src, str) and src.startswith("rtsp://"):
+            # For RTSP, force TCP transport to avoid FFmpeg pthread_frame async_lock assertion crashes
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+            self.capture = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
         else:
             self.capture = cv2.VideoCapture(src)
             
@@ -430,6 +453,23 @@ def main():
     # Key: (cam_idx, person_id) -> ViolationState
     violation_states = {}
     active_recordings = []
+
+    # Fall Detection State
+    # position_history: {(cam_idx, tracker_id): deque of y_center values}
+    # fall_states:      {(cam_idx, tracker_id): time when fall first detected}
+    from collections import deque
+    position_history = {}  # rolling Y-center buffer
+    fall_states      = {}  # time at which person first became horizontal
+    FALL_ASPECT_THRESHOLD = 1.5   # width/height > this = horizontal/fallen (stricter for webcams)
+    FALL_VELOCITY_THRESHOLD = 20  # pixels dropped in 5 frames = fast drop
+    FALL_ALERT_SECONDS = 5.0      # seconds must stay fallen before alert
+    fall_alert_cooldowns = {}      # {(cam_idx, tracker_id): last_alert_time}
+    fall_recordings = set()        # {(cam_idx, tracker_id)} currently being recorded
+    FALL_ALERT_API_COOLDOWN = 30.0 # seconds between repeated API calls for same fall
+    person_last_seen   = {}        # {(cam_idx, pid): last_time they appeared in tracked_persons}
+    person_last_zone   = {}        # {(cam_idx, pid): 'restricted' or 'safe'}
+    FALL_DISAPPEAR_SEC = 3.0       # seconds a known person can vanish before triggering fall alert
+
     
     # Cooldown Sync
     last_reset_check = time.time()
@@ -893,11 +933,23 @@ def main():
                             owner_pid = tracker_person_map.get((cam_idx, tid))
                             break
                 
-                if owner_pid:
-                    if owner_pid == "???": continue
-                    if owner_pid not in person_ppe_map:
-                        person_ppe_map[owner_pid] = set()
-                    person_ppe_map[owner_pid].add(class_name)
+                if not owner_pid or owner_pid == "???":
+                    # Determine tid to use for unknown person
+                    matched_tid = track_id if track_id != -1 else None
+                    if matched_tid is None:
+                        cx = (box[0] + box[2]) / 2
+                        cy = (box[1] + box[3]) / 2
+                        for t, pbox in tracked_persons.items():
+                            if pbox[0] < cx < pbox[2] and pbox[1] < cy < pbox[3]:
+                                matched_tid = t
+                                break
+                    if matched_tid is None:
+                        continue # Still no tracker, skip
+                    owner_pid = f"Unknown_T{matched_tid}"
+                    
+                if owner_pid not in person_ppe_map:
+                    person_ppe_map[owner_pid] = set()
+                person_ppe_map[owner_pid].add(class_name)
 
             # 2. Resolve Conflicts & Determine Violations
             current_frame_violations = {} # {person_id: [confimed_violations]}
@@ -913,18 +965,59 @@ def main():
                 violations = [x for x in items if 'NO-' in x]
                 if violations:
                     current_frame_violations[pid] = violations
+
+            # 1.5 Sub-Area Intrusion Detection (Polygon Test)
+            zones = RESTRICTED_ZONES.get(camera_id, [])
+            if zones:
+                for tid, bbox in tracked_persons.items():
+                    pid = tracker_person_map.get((cam_idx, tid))
+                    if not pid or pid == "???":
+                        pid = f"Unknown_T{tid}"
+                    
+                    x1, y1, x2, y2 = bbox
+                    # Calculate 'foot' position (bottom center)
+                    foot_x = (x1 + x2) / 2
+                    foot_y = y2
+                    
+                    in_zone = False
+                    for polygon in zones:
+                        # Check if foot is inside polygon
+                        # returns > 0 if inside, 0 if on edge, < 0 if outside
+                        pt_test = cv2.pointPolygonTest(polygon, (foot_x, foot_y), False)
+                        if cam_idx == 1: # Cam 2
+                            print(f"[ZoneDebug] {pid} feet at ({foot_x:.1f}, {foot_y:.1f}) -> Polygon Test Result: {pt_test}")
+                        
+                        if pt_test >= 0:
+                            if pid not in current_frame_violations:
+                                current_frame_violations[pid] = []
+                            current_frame_violations[pid].append("RESTRICTED_AREA_INTRUSION")
+                            in_zone = True
+                            break # Once inside any zone on this camera, breaking to next person
+                            
+                    if in_zone:
+                        if person_last_zone.get((cam_idx, pid)) != 'restricted':
+                            print(f"[RestrictedZone] Person {pid} ENTERED the restricted zone on Cam {cam_idx+1}")
+                        person_last_zone[(cam_idx, pid)] = 'restricted'
+                    else:
+                        person_last_zone[(cam_idx, pid)] = 'safe'
+            else:
+                for tid in tracked_persons.keys():
+                    pid = tracker_person_map.get((cam_idx, tid))
+                    if not pid or pid == "???":
+                        pid = f"Unknown_T{tid}"
+                    person_last_zone[(cam_idx, pid)] = 'safe'
             
             # 2. Update Violation States
             # Iterate all confirmed people on this camera
             active_pids = set()
             for tid in tracked_persons:
                 pid = tracker_person_map.get((cam_idx, tid))
-                if pid: active_pids.add(pid)
+                if not pid or pid == "???":
+                    pid = f"Unknown_T{tid}"
+                active_pids.add(pid)
                 
             for pid in active_pids:
-                if pid == "???": continue
-                
-                # Get state or create new
+                # get state or create new
                 state_key = (cam_idx, pid)
                 if state_key not in violation_states:
                     violation_states[state_key] = ViolationState(pid)
@@ -1105,7 +1198,144 @@ def main():
                     cv2.rectangle(frame, (fx1, fy2 + 5), (fx1 + pid_w + 10, fy2 + pid_h + 15), id_color, -1)
                     cv2.putText(frame, id_label, (fx1 + 5, fy2 + pid_h + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
+            # --- NO VEST: Draw red box on persons with no vest detected ---
+            for tracker_id, person_bbox in tracked_persons.items():
+                pid = tracker_person_map.get((cam_idx, tracker_id), None)
+                if not pid:
+                    continue
+                # Check if this person had a vest detected this frame
+                has_vest = pid in person_has_positive and 'Safety Vest' in person_has_positive.get(pid, set())
+                if not has_vest:
+                    px1, py1, px2, py2 = map(int, person_bbox)
+                    person_height = py2 - py1
+                    # Torso box: from ~35% to ~75% of person height
+                    torso_y1 = py1 + int(person_height * 0.35)
+                    torso_y2 = py1 + int(person_height * 0.75)
+                    # Draw red torso box
+                    cv2.rectangle(frame, (px1, torso_y1), (px2, torso_y2), (0, 0, 255), 2)
+                    # Draw label background + text
+                    label = "No Vest"
+                    (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    cv2.rectangle(frame, (px1, torso_y1 - lh - 8), (px1 + lw + 8, torso_y1), (0, 0, 200), -1)
+                    cv2.putText(frame, label, (px1 + 4, torso_y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            # ─── FALL DETECTION CHECK ───────────────────────────────────────────
+            now = time.time()
+            for tracker_id, person_bbox in tracked_persons.items():
+                pid = tracker_person_map.get((cam_idx, tracker_id), None)
+                key = (cam_idx, tracker_id)
+                
+                # Suppress fall detection completely if the person is in a restricted zone
+                if pid and person_last_zone.get((cam_idx, pid)) == 'restricted':
+                    # Ensure any existing fall countdown is immediately canceled
+                    if key in fall_states:
+                        del fall_states[key]
+                    fall_recordings.discard(key)
+                    continue
+
+                px1, py1, px2, py2 = person_bbox
+                width  = px2 - px1
+                height = py2 - py1
+                if height < 10:  # skip degenerate boxes
+                    continue
+                y_center = (py1 + py2) / 2.0
+
+                # Update position history
+                if key not in position_history:
+                    position_history[key] = deque(maxlen=10)
+                position_history[key].append(y_center)
+
+                # --- Aspect ratio: width/height > threshold means person is horizontal ---
+                aspect_ratio = width / max(height, 1)
+                is_horizontal = aspect_ratio > FALL_ASPECT_THRESHOLD
+
+                # Debug: print aspect ratio every 60 frames for Cam 1
+                if frame_count % 60 == 0 and cam_idx == 0:
+                    print(f"[FallDebug] Tracker {tracker_id}: w={width:.0f} h={height:.0f} ratio={aspect_ratio:.2f} horizontal={is_horizontal}")
+
+                # --- Velocity: did bounding-box center drop fast in last 5 frames? ---
+                hist = position_history[key]
+                vertical_drop = (hist[-1] - hist[-5]) if len(hist) >= 5 else 0
+                is_fast_drop  = vertical_drop > FALL_VELOCITY_THRESHOLD
+
+                # --- Determine fall state ---
+                # Use OR: either sudden fast drop OR sustained horizontal posture counts as fall
+                if is_horizontal or is_fast_drop:
+                    if key not in fall_states:
+                        # Record when they first went horizontal
+                        if is_fast_drop:
+                            # Sudden fall — mark start immediately
+                            fall_states[key] = now
+                        else:
+                            # Gradual / we weren't sure — start timer anyway
+                            fall_states[key] = now
+
+                    # How long have they been on the ground?
+                    fallen_duration = now - fall_states[key]
+
+                    if fallen_duration >= FALL_ALERT_SECONDS:
+                        # ====== FALL ALERT ======
+                        ix1, iy1, ix2, iy2 = map(int, person_bbox)
+                        # Semi-transparent orange overlay on the person
+                        overlay = frame.copy()
+                        cv2.rectangle(overlay, (ix1, iy1), (ix2, iy2), (0, 140, 255), -1)
+                        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                        # Bold red border around person
+                        cv2.rectangle(frame, (ix1, iy1), (ix2, iy2), (0, 50, 255), 3)
+                        # Banner at top
+                        banner_text = f"FALL DETECTED ({int(fallen_duration)}s)"
+                        (bw, bh), _ = cv2.getTextSize(banner_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                        cv2.rectangle(frame, (ix1, iy1 - bh - 12), (ix1 + bw + 10, iy1), (0, 50, 255), -1)
+                        cv2.putText(frame, banner_text, (ix1 + 5, iy1 - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        pid = tracker_person_map.get(key, "???")
+                        print(f"[FallDetection] \U0001f6a8 FALL ALERT: Person {pid} fallen for {fallen_duration:.1f}s on {camera_id}")
+
+                        # --- Trigger ActiveRecording (saves video + sends API with video_link) ---
+                        last_fall_api = fall_alert_cooldowns.get(key, 0)
+                        if now - last_fall_api >= FALL_ALERT_API_COOLDOWN and key not in fall_recordings:
+                            fall_alert_cooldowns[key] = now
+                            fall_recordings.add(key)
+                            current_cam = cams[cam_idx]
+                            rec = ActiveRecording(
+                                start_time=datetime.now(),
+                                pre_frames=current_cam.frame_buffer,
+                                camera_id=camera_id,
+                                person_id=pid,
+                                violation_type="fall_detected",
+                                track_id=tracker_id
+                            )
+                            active_recordings.append(rec)
+                            print(f"[FallDetection] \U0001f4f9 Recording fall evidence for Person {pid}...")
+                    else:
+                        # Fallen but not long enough yet — show countdown
+                        ix1, iy1, ix2, iy2 = map(int, person_bbox)
+                        remaining = FALL_ALERT_SECONDS - fallen_duration
+                        cv2.putText(frame, f"Fall? ({remaining:.1f}s)", (ix1, iy1 - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 130, 255), 2)
+                else:
+                    # Person is upright — clear fall state and recording lock
+                    if key in fall_states:
+                        del fall_states[key]
+                    fall_recordings.discard(key)
+            # ────────────────────────────────────────────────────────────────────
+
+            # ────────────────────────────────────────────────────────────────────
+
             # --- DRAWING ---
+            
+            # Draw Restricted Sub-Area Zones
+            if zones:
+                for polygon in zones:
+                    # Draw solid red border
+                    cv2.polylines(frame, [polygon], True, (0, 0, 255), 2)
+                    
+                    # Add Label at the top-left of the polygon
+                    min_x = np.min(polygon[:, 0])
+                    min_y = np.min(polygon[:, 1])
+                    cv2.putText(frame, "RESTRICTED AREA", (min_x, max(20, min_y - 10)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
             for box, track_id, class_name, conf in all_detections:
                 unique_id = f"C{cam_idx+1}_{class_name}_{track_id}"
                 

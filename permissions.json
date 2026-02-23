@@ -26,7 +26,7 @@
             "allowed_ids": [],
             "comment": "RTSP Channel 1 - Restricted for everyone including Person 1",
             "camera_brand": "dahua",
-            "rtsp_url": "rtsp://admin:ADMIN123@192.168.100.158:554/cam/realmonitor?channel=1&subtype=1"
+            "rtsp_url": "rtsp://admin:ADMIN123@192.168.100.194:554/cam/realmonitor?channel=1&subtype=1"
         },
         "Cam 3": {
             "type": "allowed",
@@ -36,7 +36,7 @@
             ],
             "comment": "RTSP Channel 5 - Allowed for Person 1",
             "camera_brand": "dahua",
-            "rtsp_url": "rtsp://admin:ADMIN123@192.168.100.158:554/cam/realmonitor?channel=5&subtype=1"
+            "rtsp_url": "rtsp://admin:ADMIN123@192.168.100.194:554/cam/realmonitor?channel=5&subtype=1"
         }
     }
 }

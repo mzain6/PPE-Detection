@@ -1,7 +1,7 @@
 import cv2
 
 CREDS = "admin:ADMIN123"
-IP    = "192.168.100.157"
+IP    = "192.168.100.194"
 
 urls = [
     # Dahua main stream formats
