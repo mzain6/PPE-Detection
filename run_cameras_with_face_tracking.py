@@ -12,6 +12,7 @@ import threading
 from collections import deque
 import sys
 import requests
+import math
 from datetime import datetime
 import os
 import json
@@ -19,6 +20,43 @@ import json
 # Import our custom modules
 from face_recognition_manager import FaceRecognitionManager
 from central_tracking_manager import CentralTrackingManager
+
+# --- Kinematic Detection Constants ---
+FALL_VELOCITY_THRESHOLD = 15.0  # px/frame logic (Tune based on relative distance & FPS)
+ASPECT_RATIO_TOLERANCE = 0.6    # Aspect ratio delta threshold
+STALE_TRACK_TIMEOUT = 30        # Frames a track can be missing before pruning
+
+# --- State Management ---
+# Structure: { "camera_id": { track_id: {'yc': float, 'ar': float, 'last_seen': int} } }
+object_history = {}
+frame_counters = {}  # Used to track the "time" (in frames) per camera for safe pruning
+
+def _send_alert_request(payload: dict):
+    """Blocking HTTP request executed safely in a background thread."""
+    try:
+        # Fast timeout ensures background threads don't pile up uncontrollably 
+        response = requests.post("http://localhost:8000/api/ppe-alerts", json=payload, timeout=2.0)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ [Kinematics] Alert failed to send: {e}")
+
+def trigger_async_alert(camera_id: str, track_id: int, event_type: str):
+    """
+    Non-blocking alert trigger module for CV loops.
+    Dispatches a daemon thread for fire-and-forget network operations.
+    """
+    # Prevent alert spam (Optional logic hook: Check if we alerted this track_id recently)
+    
+    payload = {
+        "camera_id": camera_id,
+        "track_id": track_id,
+        "event_type": event_type,
+        "timestamp": time.time()
+    }
+    
+    # Daemon threads die gracefully with the main program
+    alert_thread = threading.Thread(target=_send_alert_request, args=(payload,), daemon=True)
+    alert_thread.start()
 
 # ─── Access Control Manager ───────────────────────────────────────────────────
 class AccessControlManager:
@@ -68,13 +106,13 @@ CAM_CONFIG = [
     # Cam 1: Entrance camera — webcam, face recognition runs here
     {"id": "Cam 1", "url": 0, "is_entrance": True,  "brand": "webcam"},
     # Cam 2: RTSP Channel 1 — RESTRICTED ZONE (Dahua, direct)
-    {"id": "Cam 2",
-     "url": "rtsp://admin:ADMIN123@192.168.100.158:554/cam/realmonitor?channel=1&subtype=1",
-     "is_entrance": False, "brand": "dahua"},
-    # Cam 3: RTSP Channel 5 — ALLOWED ZONE for Person 1 (Dahua, direct)
-    {"id": "Cam 3",
-     "url": "rtsp://admin:ADMIN123@192.168.100.158:554/cam/realmonitor?channel=5&subtype=1",
-     "is_entrance": False, "brand": "dahua"},
+    # {"id": "Cam 2",
+    #  "url": "rtsp://admin:ADMIN123@192.168.100.158:554/cam/realmonitor?channel=1&subtype=1",
+    #  "is_entrance": False, "brand": "dahua"},
+    # # Cam 3: RTSP Channel 5 — ALLOWED ZONE for Person 1 (Dahua, direct)
+    # {"id": "Cam 3",
+    #  "url": "rtsp://admin:ADMIN123@192.168.100.158:554/cam/realmonitor?channel=5&subtype=1",
+    #  "is_entrance": False, "brand": "dahua"},
 ]
 
 # Paths
@@ -395,7 +433,11 @@ def main():
     
     # Load standard YOLO for person detection (class 0 = person)
     print("Loading person detection model...")
-    model_person = YOLO('yolov8n.pt')  # Standard model with person class
+    model_person = YOLO('yolov8n-pose.pt')  # Upgraded to pose model for skeletal tracking
+    
+    # Load General Object model for Dropped Hazards
+    print("Loading general object model (yolov8n.pt)...")
+    model_object = YOLO('yolov8n.pt')
     
     # Move models to GPU
     if USE_GPU:
@@ -403,6 +445,7 @@ def main():
         model_helmet = model_helmet.to('cuda:0')
         model_vest = model_vest.to('cuda:0')
         model_person = model_person.to('cuda:0')
+        model_object = model_object.to('cuda:0')
         print("✅ Models loaded on GPU!")
         print(f"💾 Using FP{16 if USE_FP16 else 32} precision")
         
@@ -416,6 +459,15 @@ def main():
     # yolov8_vest_small.pt class 2 = 'vest' (only vest class needed; skip helmet/gloves/boots etc.)
     vest_ids = get_target_class_ids(model_vest, ['vest'])
     print(f"[VestModel] Using class IDs: {vest_ids} from {model_vest.names}")
+
+    # Dropped Object Target Classes (Track ALL non-person items since pillows/random debris might misclassify)
+    # COCO has 80 classes (0 is person), so we track 1 through 79
+    hazard_ids = [i for i in range(1, 80)]
+    
+    # --- Dropped Object System Variables ---
+    EDGE_MARGIN = 50
+    materialization_history = {}  # { camera_id: { track_id: {'initial_center': (x,y), 'latest_center': (x,y), 'status': str, 'spawn_time': float} } }
+    # ---------------------------------------
 
     # Start Camera Streams
     cams = []
@@ -522,12 +574,24 @@ def main():
             tracked_persons = {}
             all_detections = []
             
+            # Set to track IDs seen in the current frame for Phantom Memory logic
+            current_frame_tids = set()
+            
+            # --- Initialize Kinematic Tracker for this Camera ---
+            if camera_id not in object_history:
+                object_history[camera_id] = {}
+                frame_counters[camera_id] = 0
+
+            frame_counters[camera_id] += 1
+            current_frame_num = frame_counters[camera_id]
+            
             if DO_INFERENCE:
-                # 1. PERSON DETECTION (Optimized: conf=0.60 STRICT)
+                # 1. PERSON DETECTION (Optimized for horizontal captures)
                 res_person = model_person.track(
                     frame, 
-                    conf=0.60,  # CRITICAL: Increased to 60% to stop false detections
+                    conf=0.3,  # LOWERED to 30% for prone body detection
                     persist=True, 
+                    tracker="bytetrack.yaml", # Enforce bytetrack for reliable IDs
                     classes=[0], 
                     imgsz=INFERENCE_IMGSZ,
                     verbose=False, 
@@ -544,8 +608,10 @@ def main():
                         boxes = result.boxes.xyxy.cpu().numpy()
                         ids = result.boxes.id.cpu().numpy().astype(int)
                         
+                        kpts_array = result.keypoints.xy.cpu().numpy() if result.keypoints is not None else [None] * len(boxes)
+                        
                         # Validate person detections (filter false positives)
-                        for b, tid in zip(boxes, ids):
+                        for b, tid, kp in zip(boxes, ids, kpts_array):
                             x1, y1, x2, y2 = b
                             width = x2 - x1
                             height = y2 - y1
@@ -553,11 +619,75 @@ def main():
                             aspect_ratio = height / width if width > 0 else 0
                             
                             # Validation: STRICT CHECK
-                            # 1. Area check
                             if area < PERSON_MIN_AREA: continue
+                            if aspect_ratio < 0.2 or aspect_ratio > 5.0: continue
                             
-                            # 2. Aspect Ratio check
-                            if not (PERSON_MIN_ASPECT_RATIO <= aspect_ratio <= PERSON_MAX_ASPECT_RATIO): continue
+                            current_frame_tids.add(tid)
+                            
+                            # --- SKELETAL POSTURE: FALL DETECTION ---
+                            is_fallen = False
+                            angle = 0.0
+                            
+                            if kp is not None and len(kp) >= 13:
+                                # Keypoint indices: 5=Left Shoulder, 6=Right Shoulder, 11=Left Hip, 12=Right Hip
+                                ls, rs = kp[5], kp[6]
+                                lh, rh = kp[11], kp[12]
+                                
+                                # Check if keypoints are confidently detected (not origin [0,0])
+                                if all(v[0] > 0 and v[1] > 0 for v in [ls, rs, lh, rh]):
+                                    mid_shoulder = ((ls[0] + rs[0]) / 2.0, (ls[1] + rs[1]) / 2.0)
+                                    mid_hip = ((lh[0] + rh[0]) / 2.0, (lh[1] + rh[1]) / 2.0)
+                                    
+                                    dx = mid_hip[0] - mid_shoulder[0]
+                                    dy = mid_hip[1] - mid_shoulder[1]
+                                    
+                                    # Angle relative to vertical Y-axis
+                                    angle = math.degrees(math.atan2(abs(dx), abs(dy) + 1e-6))
+                                    is_fallen = angle > 45.0
+                                    
+                                    # Draw skeleton spine
+                                    cv2.line(frame, (int(mid_shoulder[0]), int(mid_shoulder[1])), 
+                                             (int(mid_hip[0]), int(mid_hip[1])), (0, 255, 255), 3)
+                                    cv2.circle(frame, (int(mid_shoulder[0]), int(mid_shoulder[1])), 5, (255, 0, 0), -1)
+                                    cv2.circle(frame, (int(mid_hip[0]), int(mid_hip[1])), 5, (0, 0, 255), -1)
+                            
+                            state_str = "Fallen" if is_fallen else "Upright"
+                            color = (0, 0, 255) if is_fallen else (0, 255, 0)
+                            
+                            if tid not in object_history[camera_id]:
+                                object_history[camera_id][tid] = {
+                                    'state': 'Upright',
+                                    'fall_start_time': None,
+                                    'last_seen_time': current_time,
+                                    'last_bbox': [x1, y1, x2, y2],
+                                    'fall_alerted': False
+                                }
+                                
+                            tracker_state = object_history[camera_id][tid]
+                            tracker_state['state'] = state_str
+                            tracker_state['last_seen_time'] = current_time
+                            tracker_state['last_bbox'] = [int(x1), int(y1), int(x2), int(y2)]
+                            
+                            if is_fallen:
+                                if tracker_state.get('fall_start_time') is None:
+                                    tracker_state['fall_start_time'] = current_time
+                                    
+                                time_fallen = current_time - tracker_state['fall_start_time']
+                                
+                                # Draw timer (NO IDs explicitly as requested)
+                                cv2.putText(frame, f"Falling: {time_fallen:.1f}s", (int(x1), int(y1) - 10),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                                
+                                if time_fallen >= 5.0:
+                                    if not tracker_state.get('fall_alerted', False):
+                                        print(f"🚨 [Skeletal] SUSTAINED FALL DETECTED (5s+): Tracker {tid} on {camera_id} (Angle: {angle:.1f} deg)")
+                                        trigger_async_alert(camera_id, tid, "FALLING")
+                                        tracker_state['fall_alerted'] = True
+                            else:
+                                tracker_state['fall_start_time'] = None
+                                tracker_state['fall_alerted'] = False
+                                cv2.putText(frame, f"State: {state_str}", (int(x1), int(y1) - 10),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                             
                             # Valid person detection
                             tracked_persons[tid] = b
@@ -612,7 +742,94 @@ def main():
                                     continue
                                 all_detections.append((b, -1, c_name, cf))
                 
-                # 3. PROXY TRACKER CREATION (Fallback for missing people)
+                # 3. GENERAL OBJECT DETECTION for Dropped Hazards
+                if camera_id not in materialization_history:
+                    materialization_history[camera_id] = {}
+                    
+                res_obj = model_object.track(
+                    frame, conf=0.15, persist=True, classes=hazard_ids, 
+                    imgsz=INFERENCE_IMGSZ, verbose=False, iou=IOU_THRESHOLD,
+                    half=USE_FP16, device=0 if USE_GPU else 'cpu',
+                    tracker="bytetrack.yaml"
+                )
+                
+                if res_obj and len(res_obj) > 0:
+                    result_obj = res_obj[0]
+                    if result_obj.boxes.id is not None:
+                        b_boxes = result_obj.boxes.xyxy.cpu().numpy()
+                        b_ids = result_obj.boxes.id.cpu().numpy().astype(int)
+                        
+                        current_obj_tids = set()
+                        
+                        for b, tid in zip(b_boxes, b_ids):
+                            current_obj_tids.add(tid)
+                            x1, y1, x2, y2 = b
+                            cx = (x1 + x2) / 2.0
+                            cy = (y1 + y2) / 2.0
+                            
+                            is_deep_inside = (x1 > EDGE_MARGIN and y1 > EDGE_MARGIN and 
+                                              x2 < (CAM_SIZE[0] - EDGE_MARGIN) and 
+                                              y2 < (CAM_SIZE[1] - EDGE_MARGIN))
+                                              
+                            if tid not in materialization_history[camera_id]:
+                                materialization_history[camera_id][tid] = {
+                                    'initial_center': (cx, cy),
+                                    'latest_center': (cx, cy),
+                                    'status': 'Tracking',
+                                    'spawn_time': current_time,
+                                    'is_deep_spawn': is_deep_inside,
+                                    'max_vy': 0.0,
+                                    'hazard_start_time': None,
+                                    'alerted': False
+                                }
+                            
+                            obj_state = materialization_history[camera_id][tid]
+                            prev_cy = obj_state['latest_center'][1]
+                            
+                            v_y = cy - prev_cy
+                            obj_state['latest_center'] = (cx, cy)
+                            
+                            # Keep track of peak downward velocity
+                            if v_y > obj_state['max_vy']: 
+                                obj_state['max_vy'] = v_y
+                            
+                            time_alive = current_time - obj_state['spawn_time']
+                            is_hazard = False
+                            
+                            # Condition A (Drop Spawn): Appeared deep inside the frame away from edges
+                            # Meaning it fell into the camera's Z-axis depth plane, not walking in from the side
+                            if obj_state['is_deep_spawn'] and time_alive < 1.0:
+                                is_hazard = True
+                                
+                            # Condition B (Kinematic Drop): Falling exceedingly fast, then suddenly hitting 0 (the floor)
+                            if obj_state['max_vy'] > 15.0 and v_y < 5.0:
+                                is_hazard = True
+                                
+                            if is_hazard or obj_state['status'] == 'DROPPED HAZARD':
+                                obj_state['status'] = 'DROPPED HAZARD'
+                                
+                                if obj_state['hazard_start_time'] is None:
+                                    obj_state['hazard_start_time'] = current_time
+                                    
+                                time_fallen = current_time - obj_state['hazard_start_time']
+                                
+                                # Visual Overlay (Orange dashed hazard box)
+                                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 165, 255), 3)
+                                cv2.putText(frame, f"HAZARD (Dropped): {time_fallen:.1f}s", (int(x1), int(y1) - 10),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+                                
+                                # 5-Second Delayed Alert
+                                if time_fallen >= 5.0 and not obj_state['alerted']:
+                                    print(f"🚨 [Hazard] SUSTAINED DROPPED OBJECT (5s+): Tracker {tid} on {camera_id}")
+                                    trigger_async_alert(camera_id, tid, "Dropped Hazard")
+                                    obj_state['alerted'] = True
+                        
+                        # Cleanup stale objects
+                        stale_obj_tids = [t for t in materialization_history[camera_id] if t not in current_obj_tids]
+                        for t in stale_obj_tids:
+                            del materialization_history[camera_id][t]
+                
+                # 4. PROXY TRACKER CREATION (Fallback for missing people)
                 # Ifwe have a PPE detection that is NOT inside a person box, create a proxy person
                 for idx, (ppe_box, ppe_tid, ppe_class, ppe_conf) in enumerate(all_detections):
                     # Determine the proxy ID
@@ -666,6 +883,39 @@ def main():
                 # SKIP INFERENCE case
                 all_detections = last_ppe_detections.get(cam_idx, [])
                 # tracked_persons remains empty, will be filled by coasting restoration below
+
+            # --- PHANTOM MEMORY GRACE PERIOD LOGIC ---
+            if camera_id in object_history:
+                stale_tids = []
+                for tid, tracker_state in object_history[camera_id].items():
+                    # If this ID was NOT seen in the current loop frame
+                    if tid not in current_frame_tids:
+                        time_missing = current_time - tracker_state.get('last_seen_time', current_time)
+                        
+                        if time_missing < 2.0: # Grace Period
+                            bx1, by1, bx2, by2 = tracker_state.get('last_bbox', [0, 0, 0, 0])
+                            
+                            # Draw grayed-out dashed-like bounding box
+                            cv2.rectangle(frame, (int(bx1), int(by1)), (int(bx2), int(by2)), (128, 128, 128), 2, cv2.LINE_AA)
+                            
+                            if tracker_state.get('state') == "Fallen" and tracker_state.get('fall_start_time') is not None:
+                                time_fallen = current_time - tracker_state['fall_start_time']
+                                cv2.putText(frame, f"Falling (Lost): {time_fallen:.1f}s", (int(bx1), int(by1) - 10),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)
+                                
+                                if time_fallen >= 5.0 and not tracker_state.get('fall_alerted', False):
+                                    print(f"🚨 [Phantom] SUSTAINED FALL DETECTED (5s+ grace): {camera_id}")
+                                    trigger_async_alert(camera_id, tid, "FALLING")
+                                    tracker_state['fall_alerted'] = True
+                            else:
+                                cv2.putText(frame, f"State: {tracker_state.get('state', 'Upright')}", (int(bx1), int(by1) - 10),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)
+                        else:
+                            stale_tids.append(tid)
+
+                for tid in stale_tids:
+                    del object_history[camera_id][tid]
+            # ------------------------------------------------
 
             # --- COASTING RESTORATION (Anti-Flicker & Frame Skipping Fill) ---
             # Restore tracks if:
@@ -1302,7 +1552,7 @@ def main():
                                 pre_frames=current_cam.frame_buffer,
                                 camera_id=camera_id,
                                 person_id=pid,
-                                violation_type="fall_detected",
+                                violation_type="Fall Detected",
                                 track_id=tracker_id
                             )
                             active_recordings.append(rec)
