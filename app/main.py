@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from app.routers import cameras, detections, stream, health, alerts
-from app.routers import ws_detections
+from app.routers import ws_detections, runner
 from app.services.worker import worker
 from app.utils.gpu_utils import get_cuda_info, optimize_for_inference
 import logging
@@ -46,6 +46,7 @@ app.include_router(detections.router)
 app.include_router(stream.router)
 app.include_router(ws_detections.router)
 app.include_router(alerts.router)  # Add alerts router
+app.include_router(runner.router)  # Add runner router
 
 @app.on_event("startup")
 def startup_event():

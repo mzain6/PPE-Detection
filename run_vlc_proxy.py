@@ -22,7 +22,8 @@ def run_proxy():
         VLC_PATH,
         "-I", "dummy",
         "-vvv",
-        "--network-caching=200", # Reduce network latency
+        "--network-caching=300", # Moderate caching to prevent disconnects while keeping latency low
+        "--rtsp-tcp", # Keep TCP for stability
         "--clock-jitter=0",
         "--clock-synchro=0",
         RTSP_URL,

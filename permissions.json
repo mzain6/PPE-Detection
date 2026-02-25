@@ -9,6 +9,15 @@
             "restricted_cameras": [
                 "Cam 2"
             ]
+        },
+        "02": {
+            "name": "Person 2 (User)",
+            "allowed_cameras": [
+                "Cam 1",
+                "Cam 2",
+                "Cam 3"
+            ],
+            "restricted_cameras": []
         }
     },
     "cameras": {
@@ -16,23 +25,27 @@
             "type": "entrance",
             "zone_type": "allowed_all",
             "allowed_ids": [
-                "01"
+                "01",
+                "02"
             ],
             "comment": "Webcam - Entrance, face recognition here"
         },
         "Cam 2": {
             "type": "restricted",
-            "zone_type": "restricted_all",
-            "allowed_ids": [],
-            "comment": "RTSP Channel 1 - Restricted for everyone including Person 1",
-            "camera_brand": "dahua",
-            "rtsp_url": "rtsp://admin:ADMIN123@192.168.100.194:554/cam/realmonitor?channel=1&subtype=1"
+            "zone_type": "allowed_whitelist",
+            "allowed_ids": [
+                "02"
+            ],
+            "comment": "RTSP Channel 1 - Restricted for Person 1, Allowed for Person 2",
+            "camera_brand": "yoosee",
+            "rtsp_url": "http://localhost:8888/stream.mjpg"
         },
         "Cam 3": {
             "type": "allowed",
             "zone_type": "allowed_whitelist",
             "allowed_ids": [
-                "01"
+                "01",
+                "02"
             ],
             "comment": "RTSP Channel 5 - Allowed for Person 1",
             "camera_brand": "dahua",

@@ -80,3 +80,11 @@ coverage.xml
 # Environment variables
 .env
 .env.local
+
+# Excluded model files (too large / not to be tracked)
+check.pt
+best1.pt
+yolov8m-face-lindevs.pt
+
+# Evidence video clips (generated at runtime)
+evidence/

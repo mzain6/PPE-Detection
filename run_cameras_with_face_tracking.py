@@ -35,12 +35,12 @@ def _send_alert_request(payload: dict):
     """Blocking HTTP request executed safely in a background thread."""
     try:
         # Fast timeout ensures background threads don't pile up uncontrollably 
-        response = requests.post("http://localhost:8000/api/ppe-alerts", json=payload, timeout=2.0)
+        response = requests.post("http://localhost:8001/api/ppe-alert", json=payload, timeout=2.0)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         print(f"⚠️ [Kinematics] Alert failed to send: {e}")
 
-def trigger_async_alert(camera_id: str, track_id: int, event_type: str):
+def trigger_async_alert(camera_id: str, track_id: int, event_type: str, person_id: str = "Unknown"):
     """
     Non-blocking alert trigger module for CV loops.
     Dispatches a daemon thread for fire-and-forget network operations.
@@ -48,10 +48,12 @@ def trigger_async_alert(camera_id: str, track_id: int, event_type: str):
     # Prevent alert spam (Optional logic hook: Check if we alerted this track_id recently)
     
     payload = {
-        "camera_id": camera_id,
-        "track_id": track_id,
-        "event_type": event_type,
-        "timestamp": time.time()
+        "camera_id": str(camera_id),
+        "track_id": int(track_id),
+        "event_type": str(event_type), # Using event_type, backend might map it to violation_type
+        "violation_type": str(event_type), 
+        "person_id": str(person_id),
+        "timestamp": datetime.now().isoformat()
     }
     
     # Daemon threads die gracefully with the main program
@@ -105,14 +107,8 @@ class AccessControlManager:
 CAM_CONFIG = [
     # Cam 1: Entrance camera — webcam, face recognition runs here
     {"id": "Cam 1", "url": 0, "is_entrance": True,  "brand": "webcam"},
-    # Cam 2: RTSP Channel 1 — RESTRICTED ZONE (Dahua, direct)
-    # {"id": "Cam 2",
-    #  "url": "rtsp://admin:ADMIN123@192.168.100.158:554/cam/realmonitor?channel=1&subtype=1",
-    #  "is_entrance": False, "brand": "dahua"},
-    # # Cam 3: RTSP Channel 5 — ALLOWED ZONE for Person 1 (Dahua, direct)
-    # {"id": "Cam 3",
-    #  "url": "rtsp://admin:ADMIN123@192.168.100.158:554/cam/realmonitor?channel=5&subtype=1",
-    #  "is_entrance": False, "brand": "dahua"},
+    # Cam 2: RTSP via VLC Proxy
+    {"id": "Cam 2", "url": "http://localhost:8888/stream.mjpg", "is_entrance": False, "brand": "yoosee"},
 ]
 
 # Paths
@@ -167,8 +163,8 @@ PERSON_MIN_ASPECT_RATIO = 1.6  # Increased from 1.2 (people are clearly taller t
 # The coordinates here are for a 640x360 frame
 RESTRICTED_ZONES = {
     "Cam 2": [
-        # Shifted left and down significantly to lay flat on the grass
-        np.array([[220, 260], [380, 200], [500, 280], [340, 340]], np.int32)
+        # Bottom-right restricted area per user screenshot
+        np.array([[380, 340], [380, 230], [600, 230], [600, 340]], np.int32)
     ]
 }
 
@@ -681,7 +677,17 @@ def main():
                                 if time_fallen >= 5.0:
                                     if not tracker_state.get('fall_alerted', False):
                                         print(f"🚨 [Skeletal] SUSTAINED FALL DETECTED (5s+): Tracker {tid} on {camera_id} (Angle: {angle:.1f} deg)")
-                                        trigger_async_alert(camera_id, tid, "FALLING")
+                                        current_cam = cams[cam_idx]
+                                        rec = ActiveRecording(
+                                            start_time=datetime.now(),
+                                            pre_frames=current_cam.frame_buffer,
+                                            camera_id=camera_id,
+                                            person_id=tracker_person_map.get(tid, "Unknown"),
+                                            violation_type="FALLING",
+                                            track_id=int(tid)
+                                        )
+                                        active_recordings.append(rec)
+                                        print(f"[Skeletal] 📹 Recording falling evidence for object {tid}...")
                                         tracker_state['fall_alerted'] = True
                             else:
                                 tracker_state['fall_start_time'] = None
@@ -821,7 +827,17 @@ def main():
                                 # 5-Second Delayed Alert
                                 if time_fallen >= 5.0 and not obj_state['alerted']:
                                     print(f"🚨 [Hazard] SUSTAINED DROPPED OBJECT (5s+): Tracker {tid} on {camera_id}")
-                                    trigger_async_alert(camera_id, tid, "Dropped Hazard")
+                                    current_cam = cams[cam_idx]
+                                    rec = ActiveRecording(
+                                        start_time=datetime.now(),
+                                        pre_frames=current_cam.frame_buffer,
+                                        camera_id=camera_id,
+                                        person_id="Unknown",
+                                        violation_type="Dropped Hazard",
+                                        track_id=int(tid)
+                                    )
+                                    active_recordings.append(rec)
+                                    print(f"[Hazard] 📹 Recording dropped hazard evidence for object {tid}...")
                                     obj_state['alerted'] = True
                         
                         # Cleanup stale objects
@@ -905,7 +921,17 @@ def main():
                                 
                                 if time_fallen >= 5.0 and not tracker_state.get('fall_alerted', False):
                                     print(f"🚨 [Phantom] SUSTAINED FALL DETECTED (5s+ grace): {camera_id}")
-                                    trigger_async_alert(camera_id, tid, "FALLING")
+                                    current_cam = cams[cam_idx]
+                                    rec = ActiveRecording(
+                                        start_time=datetime.now(),
+                                        pre_frames=current_cam.frame_buffer,
+                                        camera_id=camera_id,
+                                        person_id="Unknown",
+                                        violation_type="FALLING",
+                                        track_id=int(tid)
+                                    )
+                                    active_recordings.append(rec)
+                                    print(f"[Phantom] 📹 Recording falling evidence for object {tid}...")
                                     tracker_state['fall_alerted'] = True
                             else:
                                 cv2.putText(frame, f"State: {tracker_state.get('state', 'Upright')}", (int(bx1), int(by1) - 10),
