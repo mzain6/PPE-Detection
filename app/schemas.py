@@ -40,6 +40,11 @@ class CameraRegisterRequest(BaseModel):
     fps: int = Field(default=15, description="Frames per second")
     roi: Optional[List[int]] = Field(default=None, description="Region of interest [x1, y1, x2, y2]")
 
+class CameraConnectRequest(BaseModel):
+    camera_id: str = Field(..., description="Unique camera identifier")
+    source: str = Field(..., description="RTSP stream URL or webcam index (0 for webcam)")
+    is_entrance: bool = Field(default=False, description="Whether this camera is used for face recognition at entrance")
+
 class CameraResponse(BaseModel):
     camera_id: str
     rtsp_url: str

@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PPE Detection — Live Monitor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet" />
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        /* Glowing badge */
+        @keyframes pulse-dot {
+
+            0%,
+            100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+
+            50% {
+                opacity: .7;
+                transform: scale(1.4);
+            }
+        }
+
+        .dot-live {
+            animation: pulse-dot 1.5s ease-in-out infinite;
+        }
+
+        /* Subtle gradient card border */
+        .card-gradient {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            border: 1px solid rgba(255, 255, 255, .08);
+        }
+
+        /* Stream container shine */
+        .stream-wrap {
+            background: radial-gradient(ellipse at center, #0f172a 60%, #020617 100%);
+            border: 1px solid rgba(99, 102, 241, .35);
+            box-shadow: 0 0 40px rgba(99, 102, 241, .12);
+        }
+
+        /* Spinner */
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .spinner {
+            animation: spin .9s linear infinite;
+        }
+
+        /* Slide-in toast */
+        @keyframes slide-in {
+            from {
+                opacity: 0;
+                transform: translateY(-8px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .toast-anim {
+            animation: slide-in .3s ease;
+        }
+
+        input:focus {
+            outline: none;
+            box-shadow: 0 0 0 2px rgba(99, 102, 241, .5);
+        }
+    </style>
+</head>
+
+<body class="h-full min-h-screen bg-[#020617] text-slate-200">
+
+    <!-- ──────────────────────── TOPBAR ──────────────────────── -->
+    <header
+        class="sticky top-0 z-50 bg-[#020617]/80 backdrop-blur border-b border-white/5 px-6 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <!-- Shield icon -->
+            <svg class="w-7 h-7 text-indigo-400" fill="none" stroke="currentColor" stroke-width="1.7"
+                viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+            </svg>
+            <span class="font-semibold text-base tracking-tight">PPE <span
+                    class="text-indigo-400">Detection</span></span>
+        </div>
+        <a href="http://localhost:8001/alerts" target="_blank"
+            class="text-xs font-medium text-indigo-400 hover:text-indigo-300 transition border border-indigo-700/40 hover:border-indigo-500/60 px-3 py-1.5 rounded-lg">
+            Alerts Dashboard ↗
+        </a>
+    </header>
+
+    <!-- ──────────────────────── MAIN ──────────────────────── -->
+    <main class="max-w-6xl mx-auto px-4 py-8 grid gap-8 lg:grid-cols-[340px_1fr]">
+
+        <!-- ── LEFT PANEL ── -->
+        <aside class="flex flex-col gap-5">
+
+            <!-- Camera Registration Card -->
+            <div class="card-gradient rounded-2xl p-6">
+                <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-widest mb-5">Register Camera</h2>
+
+                <form id="registerForm" class="flex flex-col gap-4" novalidate>
+
+                    <!-- Raw JSON Payload -->
+                    <div>
+                        <label class="block text-xs text-slate-400 mb-1.5">JSON Payload</label>
+                        <textarea id="jsonPayload" rows="7" required class="w-full bg-slate-800/60 font-mono text-sm text-indigo-200 rounded-lg px-3.5 py-2.5
+                        border border-slate-700 hover:border-indigo-600 transition" spellcheck="false">{
+  "camera_id": "webcam-1",
+  "source": "0",
+  "is_entrance": true
+}</textarea>
+                    </div>
+
+                    <!-- Status badge -->
+                    <div id="statusBadge" class="hidden toast-anim rounded-xl px-4 py-3 text-xs font-medium"></div>
+
+                    <!-- Submit -->
+                    <button type="submit" id="connectBtn"
+                        class="mt-1 w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500
+                       active:bg-indigo-700 text-white font-semibold text-sm rounded-xl py-3 transition-all
+                       focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-[#0f172a]">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 010 1.972l-11.54 6.347c-.75.412-1.667-.13-1.667-.986V5.653z" />
+                        </svg>
+                        Connect &amp; Stream
+                    </button>
+                </form>
+            </div>
+
+            <!-- Stream Endpoint Info -->
+            <div id="endpointInfo" class="hidden card-gradient rounded-2xl p-5">
+                <p class="text-xs text-slate-400 mb-1.5">Stream endpoint</p>
+                <code id="endpointUrl" class="block text-xs text-indigo-300 break-all leading-relaxed"></code>
+            </div>
+
+            <!-- Quick tips -->
+            <div class="card-gradient rounded-2xl p-5 text-xs text-slate-400 leading-relaxed space-y-2">
+                <p class="font-semibold text-slate-300 mb-2">💡 Quick tips</p>
+                <p>• Use <code class="text-indigo-300">0</code> as the Source for your default webcam.</p>
+                <p>• Alerts fire after a 10-second violation; check the Alerts Dashboard.</p>
+                <p>• Evidence clips are saved to the <code class="text-indigo-300">evidence/</code> folder.</p>
+            </div>
+
+        </aside>
+
+        <!-- ── RIGHT PANEL — STREAM VIEW ── -->
+        <section class="flex flex-col gap-4">
+
+            <!-- Stream header -->
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <span id="liveIndicator" class="hidden">
+                        <span class="inline-block w-2.5 h-2.5 rounded-full bg-green-400 dot-live"></span>
+                    </span>
+                    <h3 id="streamLabel" class="text-sm font-semibold text-slate-300">No camera connected</h3>
+                </div>
+                <button id="stopBtn"
+                    class="hidden text-xs font-medium text-red-400 hover:text-red-300 border border-red-800/40 hover:border-red-600/60 px-3 py-1.5 rounded-lg transition"
+                    onclick="stopStream()">
+                    ■ Stop
+                </button>
+            </div>
+
+            <!-- Stream container -->
+            <div
+                class="stream-wrap rounded-2xl overflow-hidden relative min-h-[360px] flex items-center justify-center">
+
+                <!-- Placeholder (shown before connect) -->
+                <div id="placeholder"
+                    class="absolute inset-0 flex flex-col items-center justify-center gap-4 text-slate-500">
+                    <svg class="w-14 h-14 opacity-30" fill="none" stroke="currentColor" stroke-width="1.2"
+                        viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9A2.25 2.25 0 0013.5 5.25h-9A2.25 2.25 0 002.25 7.5v9a2.25 2.25 0 002.25 2.25z" />
+                    </svg>
+                    <p class="text-sm">Register a camera to see the live processed feed</p>
+                </div>
+
+                <!-- Connecting spinner -->
+                <div id="connectingSpinner"
+                    class="hidden absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#020617]/80">
+                    <svg class="spinner w-10 h-10 text-indigo-400" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                    <p class="text-sm text-slate-400">Registering camera &amp; loading models…</p>
+                </div>
+
+                <!-- Live MJPEG stream <img> -->
+                <img id="streamImg" class="hidden w-full object-contain rounded-xl" alt="Processed PPE Detection Stream"
+                    onerror="handleStreamError()" />
+            </div>
+
+            <!-- Detection legend -->
+            <div class="flex flex-wrap gap-3 text-xs text-slate-400">
+                <span class="flex items-center gap-1.5"><span
+                        class="inline-block w-3 h-3 rounded-sm bg-green-500"></span> Hardhat / Safety Vest</span>
+                <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm bg-red-500"></span>
+                    NO-Hardhat / NO-Safety Vest</span>
+                <span class="flex items-center gap-1.5"><span
+                        class="inline-block w-3 h-3 rounded-sm bg-green-400"></span> Authorized Person</span>
+                <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm bg-red-600"></span>
+                    Unauthorized Person</span>
+                <span class="flex items-center gap-1.5"><span
+                        class="inline-block w-3 h-3 rounded-sm bg-yellow-400"></span> Unidentified</span>
+            </div>
+
+        </section>
+    </main>
+
+    <!-- ──────────────────────── SCRIPT ──────────────────────── -->
+    <script>
+        const API_BASE = 'http://localhost:8001';
+        let activeCam = null;
+
+        const form = document.getElementById('registerForm');
+        const connectBtn = document.getElementById('connectBtn');
+        const statusBadge = document.getElementById('statusBadge');
+        const streamImg = document.getElementById('streamImg');
+        const placeholder = document.getElementById('placeholder');
+        const spinner = document.getElementById('connectingSpinner');
+        const liveIndicator = document.getElementById('liveIndicator');
+        const streamLabel = document.getElementById('streamLabel');
+        const stopBtn = document.getElementById('stopBtn');
+        const endpointInfo = document.getElementById('endpointInfo');
+        const endpointUrl = document.getElementById('endpointUrl');
+
+        // ── Helpers ────────────────────────────────────────────────
+        function showStatus(msg, ok) {
+            statusBadge.className = [
+                'toast-anim rounded-xl px-4 py-3 text-xs font-medium',
+                ok ? 'bg-green-900/40 text-green-300 border border-green-700/40'
+                    : 'bg-red-900/40 text-red-300 border border-red-700/40',
+            ].join(' ');
+            statusBadge.textContent = msg;
+            statusBadge.classList.remove('hidden');
+            if (ok) setTimeout(() => statusBadge.classList.add('hidden'), 4000);
+        }
+
+        function setConnecting(on) {
+            spinner.classList.toggle('hidden', !on);
+            placeholder.classList.toggle('hidden', on);
+            connectBtn.disabled = on;
+            connectBtn.classList.toggle('opacity-60', on);
+            connectBtn.classList.toggle('cursor-not-allowed', on);
+        }
+
+        function launchStream(cameraId) {
+            const url = `${API_BASE}/api/stream/${encodeURIComponent(cameraId)}`;
+
+            streamImg.src = url;
+            streamImg.classList.remove('hidden');
+            placeholder.classList.add('hidden');
+            spinner.classList.add('hidden');
+
+            liveIndicator.classList.remove('hidden');
+            streamLabel.textContent = `Live — ${cameraId}`;
+            stopBtn.classList.remove('hidden');
+
+            endpointUrl.textContent = url;
+            endpointInfo.classList.remove('hidden');
+
+            activeCam = cameraId;
+        }
+
+        function stopStream() {
+            streamImg.src = '';
+            streamImg.classList.add('hidden');
+            placeholder.classList.remove('hidden');
+            liveIndicator.classList.add('hidden');
+            streamLabel.textContent = 'No camera connected';
+            stopBtn.classList.add('hidden');
+            endpointInfo.classList.add('hidden');
+            activeCam = null;
+        }
+
+        function handleStreamError() {
+            if (!activeCam) return;    // already stopped
+            showStatus('⚠ Stream disconnected — is the backend running?', false);
+            streamImg.classList.add('hidden');
+            placeholder.classList.remove('hidden');
+            liveIndicator.classList.add('hidden');
+            streamLabel.textContent = 'Stream error';
+        }
+
+        // ── Form submit ─────────────────────────────────────────────
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const rawJson = document.getElementById('jsonPayload').value.trim();
+            let payloadObj = null;
+
+            try {
+                payloadObj = JSON.parse(rawJson);
+            } catch (err) {
+                showStatus('Invalid JSON format. Please format carefully.', false);
+                return;
+            }
+
+            const cameraId = payloadObj['camera_id'];
+            const source = payloadObj['source'];
+
+            if (!cameraId || !source) {
+                showStatus('JSON missing "camera_id" or "source" keys.', false);
+                return;
+            }
+
+            setConnecting(true);
+            statusBadge.classList.add('hidden');
+
+            try {
+                // POST the exact JSON to the unified connect endpoint — no field mapping needed
+                const resp = await fetch(`${API_BASE}/api/camera/connect`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payloadObj),
+                });
+
+                if (!resp.ok) {
+                    const data = await resp.json().catch(() => ({}));
+                    throw new Error(data.detail || `HTTP ${resp.status}`);
+                }
+
+                showStatus(`✓ Camera '${cameraId}' connected. Starting stream…`, true);
+                launchStream(cameraId);
+
+            } catch (err) {
+                showStatus(`✗ ${err.message}`, false);
+                setConnecting(false);
+                placeholder.classList.remove('hidden');
+            } finally {
+                setConnecting(false);
+            }
+        });
+    </script>
+</body>
+
+</html>

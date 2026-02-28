@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from app.routers import cameras, detections, stream, health, alerts
@@ -40,8 +40,49 @@ os.makedirs("evidence", exist_ok=True)
 # Mount evidence directory for static file access
 app.mount("/evidence", StaticFiles(directory="evidence"), name="evidence")
 
+from app.schemas import CameraRegisterRequest, CameraConnectRequest, CameraResponse
+from app.services.camera_service import register_camera
+
 app.include_router(health.router)
 app.include_router(cameras.router)
+
+@app.post("/api/camera/connect", response_model=CameraResponse, tags=["Cameras"])
+def api_camera_connect(req: CameraConnectRequest):
+    try:
+        from app.services.camera_service import get_camera, reset_stream
+        from app.services.ppe_stream_worker import start_ppe_stream
+        # Check if already registered
+        existing = get_camera(req.camera_id)
+        if existing:
+            # Restart the annotated detection stream for this camera
+            start_ppe_stream(req.camera_id, req.source, fps=15)
+            reg_at = existing["registered_at"]
+            return CameraResponse(
+                camera_id=existing["camera_id"], 
+                rtsp_url=existing["rtsp_url"], 
+                fps=existing["fps"], 
+                registered_at=reg_at.isoformat() if hasattr(reg_at, 'isoformat') else str(reg_at)
+            )
+            
+        register_req = CameraRegisterRequest(
+            camera_id=req.camera_id,
+            rtsp_url=req.source,
+            fps=15
+        )
+        rec = register_camera(register_req)
+        # Start the annotated detection stream using run_cameras_with_face_tracking.py logic
+        start_ppe_stream(req.camera_id, req.source, fps=15)
+        reg_at = rec["registered_at"]
+        return CameraResponse(camera_id=rec["camera_id"], rtsp_url=rec["rtsp_url"], fps=rec["fps"], registered_at=reg_at.isoformat() if hasattr(reg_at, 'isoformat') else str(reg_at))
+    except Exception as e:
+        from fastapi import HTTPException
+        logger.exception("Failed to connect camera")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/stream/{camera_id}", tags=["Stream"])
+async def api_stream_camera(camera_id: str, request: Request, fps: int = None):
+    from app.routers.stream import stream_camera
+    return await stream_camera(camera_id, request, fps)
 app.include_router(detections.router)
 app.include_router(stream.router)
 app.include_router(ws_detections.router)
