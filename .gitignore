@@ -88,3 +88,6 @@ yolov8m-face-lindevs.pt
 
 # Evidence video clips (generated at runtime)
 evidence/
+
+# Alerts (generated at runtime)
+alerts/
