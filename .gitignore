@@ -81,10 +81,8 @@ coverage.xml
 .env
 .env.local
 
-# Excluded model files (too large / not to be tracked)
-check.pt
-best1.pt
-yolov8m-face-lindevs.pt
+# Excluded model files (tracked via Git LFS)
+# check.pt, best1.pt, yolov8m-face-lindevs.pt are now allowed
 
 # Evidence video clips (generated at runtime)
 evidence/
