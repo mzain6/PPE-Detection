@@ -41,7 +41,7 @@ __pycache__/
 
 # Datasets
 datasets/
-data/
+# data/
 
 # YOLOv8 runs and outputs
 runs/
