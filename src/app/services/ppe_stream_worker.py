@@ -39,9 +39,9 @@ USE_GPU  = torch.cuda.is_available()
 USE_FP16 = False
 DEVICE   = 0 if USE_GPU else "cpu"
 
-PERSON_MIN_AREA        = 3500
-PERSON_MIN_ASPECT_RATIO = 0.2
-PERSON_MAX_ASPECT_RATIO = 5.0
+PERSON_MIN_AREA        = 500
+PERSON_MIN_ASPECT_RATIO = 0.1
+PERSON_MAX_ASPECT_RATIO = 10.0
 
 # Colours / labels (same as run_cameras_with_face_tracking.py TARGET_CLASSES)
 TARGET_CLASSES = {

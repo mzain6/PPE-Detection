@@ -40,7 +40,25 @@ class PipelineManager:
         cam = get_camera(camera_id)
         device = self.default_device
         model_path = settings.model_path
-        det = YoloV8Detector(model_path=model_path, device=device, camera_id=camera_id)
+        
+        # Determine person and ppe models from config (if added) or default to the models directory
+        import os
+        from app.config import BASE_DIR
+        person_model_path = getattr(settings, "person_model_path", os.path.join(BASE_DIR, "models", "custom", "yolov8n.pt"))
+        ppe_model_path = getattr(settings, "ppe_model_path", os.path.join(BASE_DIR, "models", "custom", "best1.pt"))
+        
+        import os
+        if not os.path.exists(person_model_path) or not os.path.exists(ppe_model_path):
+            # fallback to single model if separate ones don't exist
+            det = YoloV8Detector(model_path=model_path, device=device, camera_id=camera_id)
+        else:
+            det = YoloV8Detector(
+                model_path=model_path, 
+                device=device, 
+                camera_id=camera_id,
+                person_model_path=person_model_path,
+                ppe_model_path=ppe_model_path
+            )
         return det
 
     def get_detector(self, camera_id: str) -> YoloV8Detector:

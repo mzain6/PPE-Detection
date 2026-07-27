@@ -2,12 +2,16 @@ from typing import List, Tuple, Dict
 from pathlib import Path
 import yaml
 
+import os
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 class Settings:
     # path to yaml config file (relative to repo root)
     config_path: str = "config.yaml"
 
     # model
-    model_path: str = "best.pt"
+    model_path: str = os.path.join(BASE_DIR, "models", "custom", "helmet.pt")
     input_size: int = 640
     device: str = "auto"
     confidence_threshold: float = 0.25
@@ -23,7 +27,7 @@ class Settings:
     max_missing_frames: int = 1  # Only allow 1 missing frame before removal (instant disappearance)
     stable_frames: int = 3
     person_class_name: str = "person"
-    ppe_class_names: List[str] = ["head_helmet", "vest"]  # Updated to match model class names
+    ppe_class_names: List[str] = ["head_helmet", "vest", "helmet", "Hardhat", "Safety Vest", "hi-viz helmet", "head", "NO-Hardhat", "NO-Safety Vest"]
     ppe_confidence_threshold: float = 0.25
     min_box_area: int = 100
     fall_detection_enabled: bool = False

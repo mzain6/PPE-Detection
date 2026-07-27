@@ -18,8 +18,11 @@ import os
 import json
 
 # Import our custom modules
-from face_recognition_manager import FaceRecognitionManager
-from central_tracking_manager import CentralTrackingManager
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from src.ml.face_recognition_manager import FaceRecognitionManager
+from src.core.central_tracking_manager import CentralTrackingManager
 
 # --- Kinematic Detection Constants ---
 FALL_VELOCITY_THRESHOLD = 15.0  # px/frame logic (Tune based on relative distance & FPS)
@@ -63,7 +66,7 @@ def trigger_async_alert(camera_id: str, track_id: int, event_type: str, person_i
 # ─── Access Control Manager ───────────────────────────────────────────────────
 class AccessControlManager:
     """Loads permissions.json and checks if a GlobalID is allowed on a camera."""
-    PERMISSIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'permissions.json')
+    PERMISSIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'permissions.json')
 
     def __init__(self):
         self.permissions = {}
@@ -100,24 +103,45 @@ class AccessControlManager:
         return self.camera_rules.get(camera_id, {}).get('zone_type', 'allowed_all')
 # ─────────────────────────────────────────────────────────────────────────────
 
+import requests
+
 # --- CONFIGURATION ---
-# Camera brand detection:
-#   Dahua  → rtsp://user:pass@ip/cam/realmonitor?channel=N&subtype=1  (direct OpenCV)
-#   YooSee → requires VLC proxy (MJPEG over HTTP)
-CAM_CONFIG = [
-    # Cam 1: Entrance camera — webcam, face recognition runs here
-    {"id": "Cam 1", "url": 0, "is_entrance": True,  "brand": "webcam"},
-    # Cam 2: RTSP via VLC Proxy
-    {"id": "Cam 2", "url": "http://localhost:8888/stream.mjpg", "is_entrance": False, "brand": "yoosee"},
-]
+# Dynamically load cameras from the Dashboard Database
+try:
+    print("Fetching active cameras from the Dashboard...")
+    _res = requests.get("http://localhost:8000/api/cameras", timeout=5)
+    if _res.status_code == 200:
+        db_cameras = _res.json()
+        CAM_CONFIG = []
+        for cam in db_cameras:
+            if cam.get("is_active"):
+                url = cam.get("stream_url")
+                if cam.get("type") == "webcam":
+                    try: url = int(url)
+                    except: pass
+                CAM_CONFIG.append({
+                    "id": cam.get("name", f"Cam {cam.get('id')}"), 
+                    "db_id": cam.get("id"),
+                    "url": url,
+                    "is_entrance": cam.get("is_entrance", False),
+                    "brand": "rtsp" if str(url).startswith("rtsp") else "webcam"
+                })
+        print(f"✅ Successfully loaded {len(CAM_CONFIG)} cameras from the Dashboard!")
+    else:
+        raise Exception(f"API returned status {_res.status_code}")
+except Exception as e:
+    print(f"⚠️ Failed to connect to Dashboard API: {e}. Using fallback configuration.")
+    CAM_CONFIG = [
+        {"id": "Cam 1", "url": 0, "is_entrance": True,  "brand": "webcam"},
+    ]
 
 # Paths
 # Paths
 import os
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HELMET_MODEL_PATH = os.path.join(BASE_DIR, "helmet.pt")
-VEST_MODEL_PATH = os.path.join(BASE_DIR, "yolov8_vest_small.pt")
-FACE_DB_PATH = os.path.join(BASE_DIR, "face_database.pkl")
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+HELMET_MODEL_PATH = os.path.join(BASE_DIR, "models", "custom", "helmet.pt")
+VEST_MODEL_PATH = os.path.join(BASE_DIR, "models", "custom", "yolov8_vest_small.pt")
+FACE_DB_PATH = os.path.join(BASE_DIR, "data", "face_database.pkl")
 
 # Settings
 BASE_CONF = 0.10
@@ -1728,9 +1752,14 @@ def main():
         grid = np.vstack(grid_rows)
         grid = cv2.resize(grid, GRID_SIZE)
 
-        cv2.imshow(window_name, grid)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        # Run headlessly (Do not show the desktop popup window)
+        # cv2.imshow(window_name, grid)
+        # if cv2.waitKey(1) & 0xFF == ord('q'):
+        #     break
+        
+        # Add a tiny sleep to prevent maxing out the CPU loop
+        import time
+        time.sleep(0.01)
         
         # Periodic cleanup
         if frame_count % 300 == 0:  # Every 10 seconds at 30fps
