@@ -89,3 +89,8 @@ evidence/
 
 # Alerts (generated at runtime)
 alerts/
+
+# OpenVINO model exports & scratch
+*_openvino_model/
+scratch/
+kernel.errors.txt

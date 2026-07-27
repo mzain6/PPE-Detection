@@ -64,8 +64,9 @@ class CameraWorker:
                 cid = str(c.id)
                 if cid not in _camera_registry:
                     src = c.stream_url
-                    source_type = "WEBCAM" if src.isdigit() else "RTSP"
-                    source_val = int(src) if src.isdigit() else str(src)
+                    is_webcam = src.isdigit() or "webcam" in str(getattr(c, "type", "")).lower()
+                    source_type = "WEBCAM" if is_webcam else "RTSP"
+                    source_val = int(src) if src.isdigit() else (0 if is_webcam else str(src))
                     
                     _camera_registry[cid] = {
                         "camera_id": cid,
@@ -103,33 +104,46 @@ class CameraWorker:
                     except Exception:
                         logger.exception("Failed to start stream for %s", cam_id)
 
+                    now = time.time()
                     if not getattr(stream, "is_open", lambda: True)():
-                        logger.warning("Stream not open for %s, attempting reset", cam_id)
-                        try:
-                            stream = reset_stream(cam_id)
-                            stream.start()
-                        except Exception:
-                            logger.exception("Reset failed for %s", cam_id)
+                        last_reset = getattr(self, "_last_resets", {}).get(cam_id, 0)
+                        if now - last_reset > 15.0:
+                            if not hasattr(self, "_last_resets"):
+                                self._last_resets = {}
+                            self._last_resets[cam_id] = now
+                            logger.warning("Stream not open for %s, attempting reset", cam_id)
+                            try:
+                                stream = reset_stream(cam_id)
+                                stream.start()
+                            except Exception:
+                                logger.exception("Reset failed for %s", cam_id)
+                                continue
+                        else:
                             continue
 
-                    frame = stream.read(timeout=0.5)
+                    frame = stream.read(timeout=0.2)
                     if frame is None:
-                        logger.debug("No frame for %s (source_type=%s)", cam_id, cam.get("source_type"))
                         if cam.get("source_type") == "WEBCAM":
-                            for attempt in range(self._open_retries):
-                                logger.info("Retrying webcam read for %s attempt=%s", cam_id, attempt+1)
+                            last_reset = getattr(self, "_last_resets", {}).get(cam_id, 0)
+                            if now - last_reset > 5.0:
+                                if not hasattr(self, "_last_resets"):
+                                    self._last_resets = {}
+                                self._last_resets[cam_id] = now
                                 try:
                                     stream = reset_stream(cam_id)
                                     stream.start()
+                                    frame = stream.read(timeout=0.2)
                                 except Exception:
-                                    logger.exception("Error resetting stream for %s", cam_id)
-                                    time.sleep(0.2)
-                                    continue
-                                frame = stream.read(timeout=0.5)
-                                if frame is not None:
-                                    break
+                                    logger.exception("Error resetting webcam for %s", cam_id)
                         if frame is None:
                             continue
+
+                    # ── Push raw frame immediately so the stream is NEVER black ──
+                    # The annotated frame (with boxes) is pushed again below after inference.
+                    try:
+                        set_frame(cam_id, frame.copy())
+                    except Exception:
+                        logger.exception("Failed to set raw frame for %s", cam_id)
 
                     # run inference synchronously using pipeline_manager.infer_sync
                     try:
@@ -137,13 +151,14 @@ class CameraWorker:
                         
                         # Draw bounding boxes on the frame for the MJPEG stream
                         import cv2
+                        annotated = frame.copy()
                         for track in res.get("tracks", []):
                             # Draw person box
                             pb = track.get("bbox", {})
                             if pb:
                                 px1, py1, px2, py2 = int(pb.get("x1",0)), int(pb.get("y1",0)), int(pb.get("x2",0)), int(pb.get("y2",0))
                                 color = (0, 0, 255) if track.get("fall") else (0, 255, 0)
-                                cv2.rectangle(frame, (px1, py1), (px2, py2), color, 2)
+                                cv2.rectangle(annotated, (px1, py1), (px2, py2), color, 2)
                             
                             # Draw PPE boxes
                             for ppe in track.get("ppe", []):
@@ -153,19 +168,20 @@ class CameraWorker:
                                     lbl = ppe.get("label", "")
                                     conf = ppe.get("confidence", 0.0)
                                     ppe_color = (0, 255, 0) if lbl == "Hardhat" or lbl == "Safety Vest" else (0, 0, 255)
-                                    cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), ppe_color, 2)
-                                    cv2.putText(frame, f"{lbl} ({conf:.0%})", (cx1, cy2 + 16),
+                                    cv2.rectangle(annotated, (cx1, cy1), (cx2, cy2), ppe_color, 2)
+                                    cv2.putText(annotated, f"{lbl} ({conf:.0%})", (cx1, cy2 + 16),
                                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, ppe_color, 1)
+
+                        # Push annotated frame (overwrites the raw one)
+                        try:
+                            set_frame(cam_id, annotated)
+                        except Exception:
+                            logger.exception("Failed to set annotated frame for %s", cam_id)
 
                     except Exception:
                         logger.exception("Inference failed for %s", cam_id)
+                        # Raw frame already pushed above — stream still shows video
                         continue
-
-                    # publish annotated frame for streaming consumers
-                    try:
-                        set_frame(cam_id, frame)
-                    except Exception:
-                        logger.exception("Failed to set frame for %s", cam_id)
 
                     # update last frame time and persist already done by pipeline_manager via detection_store
                     update_last_frame_time(cam_id)

@@ -33,7 +33,15 @@ async def list_cameras(
 
 @router.post("", response_model=CameraOut, status_code=status.HTTP_201_CREATED)
 async def create_camera(req: CameraCreate, db: AsyncSession = Depends(get_db)):
-    camera = Camera(**req.model_dump())
+    data = req.model_dump()
+    url = str(data.get("stream_url", "")).strip()
+    cam_type = str(data.get("type", "")).lower()
+    if not url or url.isdigit() or "webcam" in cam_type:
+        data["type"] = "webcam"
+        if not url or not url.isdigit():
+            data["stream_url"] = "0"
+
+    camera = Camera(**data)
     db.add(camera)
     await db.flush()
     await db.refresh(camera)
@@ -51,7 +59,16 @@ async def update_camera(
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    for field, value in req.model_dump(exclude_none=True).items():
+    data = req.model_dump(exclude_none=True)
+    if "stream_url" in data or "type" in data:
+        url = str(data.get("stream_url", camera.stream_url)).strip()
+        cam_type = str(data.get("type", camera.type)).lower()
+        if not url or url.isdigit() or "webcam" in cam_type:
+            data["type"] = "webcam"
+            if not url or not url.isdigit():
+                data["stream_url"] = "0"
+
+    for field, value in data.items():
         setattr(camera, field, value)
 
     await db.flush()

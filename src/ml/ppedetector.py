@@ -34,6 +34,34 @@ except Exception:
     _TORCH_AVAILABLE = False
 
 
+def _prefer_onnx(pt_path: str) -> str:
+    """
+    Model format preference chain: OpenVINO IR > ONNX > PyTorch (.pt)
+    OpenVINO is Intel-CPU-optimised (2-4x faster than ONNX on i5/i7/i9).
+    Falls back silently to .pt so the system is always stable.
+    """
+    import os
+    if not pt_path or not pt_path.endswith(".pt"):
+        return pt_path
+    base     = pt_path[:-3]
+    stem     = os.path.basename(base)
+    dir_path = os.path.dirname(pt_path)
+    # 1. OpenVINO IR directory
+    ov_dir = os.path.join(dir_path, f"{stem}_openvino_model")
+    if os.path.isdir(ov_dir):
+        return ov_dir
+    # 2. ONNX
+    onnx_path = base + ".onnx"
+    if os.path.isfile(onnx_path):
+        return onnx_path
+    # 3. Original .pt
+    return pt_path
+
+# Alias
+_prefer_optimized = _prefer_onnx
+
+
+
 def _to_numpy(x):
     """Convert tensor-like to numpy safely."""
     try:
@@ -155,7 +183,11 @@ class PPEDetector:
         else:
             self.device = device
 
-        self.model = YOLO(model_path)
+        # Resolve model path: prefer .onnx if available (faster inference),
+        # fall back to .pt if ONNX export hasn't been run yet.
+        resolved_path = _prefer_onnx(model_path)
+        self.model = YOLO(resolved_path)
+
         # move model to device if supported
         try:
             if self.device == "cuda":

@@ -24,6 +24,39 @@ from .base import Detector
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_model_path(path: str) -> str:
+    """
+    Model format preference chain: OpenVINO IR > ONNX > PyTorch (.pt)
+
+    OpenVINO is Intel-CPU-optimised (2-4x faster than ONNX on i5/i7/i9).
+    Falls back gracefully so the system always starts even without exports.
+    """
+    import os
+    if not path or not path.endswith(".pt"):
+        return path  # already an optimised format — leave as-is
+
+    base     = path[:-3]
+    stem     = os.path.basename(base)
+    dir_path = os.path.dirname(path)
+
+    # 1. OpenVINO IR directory
+    ov_dir = os.path.join(dir_path, f"{stem}_openvino_model")
+    if os.path.isdir(ov_dir):
+        logger.info("[OV] Using OpenVINO model: %s", ov_dir)
+        return ov_dir
+
+    # 2. ONNX file
+    onnx_path = base + ".onnx"
+    if os.path.isfile(onnx_path):
+        logger.info("[ONNX] Using ONNX model: %s", onnx_path)
+        return onnx_path
+
+    # 3. Original PyTorch weights
+    logger.debug("[PT] No optimised format found, using .pt: %s", path)
+    return path
+
+
 def _area(bbox: Tuple[float,float,float,float]) -> float:
     x1,y1,x2,y2 = bbox
     return max(0.0, x2-x1) * max(0.0, y2-y1)
@@ -130,12 +163,13 @@ class YoloV8Detector(Detector):
                     else:
                         dev = self.device
             
-            # Helper to load a single model
+            # Helper to load a single model (resolves .pt → .onnx automatically)
             def _load_model(path):
+                resolved = _resolve_model_path(path)
                 try:
-                    return YOLO(path) if dev is None else YOLO(path, device=dev)
+                    return YOLO(resolved) if dev is None else YOLO(resolved, device=dev)
                 except TypeError:
-                    model = YOLO(path)
+                    model = YOLO(resolved)
                     if dev is not None:
                         try:
                             model.to(dev)

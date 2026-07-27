@@ -24,16 +24,44 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ── Model paths (same as run_cameras_with_face_tracking.py) ───────────────────
-HELMET_MODEL_PATH = os.path.join(BASE_DIR, "helmet.pt")
-VEST_MODEL_PATH   = os.path.join(BASE_DIR, "yolov8_vest_small.pt")
-PERSON_MODEL_PATH = os.path.join(BASE_DIR, "yolov8n.pt")   # fallback if pose not available
 
-# ── Settings (same as run_cameras_with_face_tracking.py) ──────────────────────
-BASE_CONF        = 0.10
-INFERENCE_IMGSZ  = 640
-IOU_THRESHOLD    = 0.5
-CAM_SIZE         = (640, 360)
+def _prefer_onnx(pt_path: str) -> str:
+    """
+    Model format preference chain: OpenVINO IR > ONNX > PyTorch (.pt)
+    OpenVINO is Intel-CPU-optimised (2-4x faster than ONNX on i5/i7/i9).
+    Falls back silently so the system always works even without exports.
+    """
+    if not pt_path.endswith(".pt"):
+        return pt_path
+    base     = pt_path[:-3]
+    stem     = os.path.basename(base)
+    dir_path = os.path.dirname(pt_path)
+    # 1. OpenVINO IR directory
+    ov_dir = os.path.join(dir_path, f"{stem}_openvino_model")
+    if os.path.isdir(ov_dir):
+        return ov_dir
+    # 2. ONNX
+    onnx = base + ".onnx"
+    if os.path.isfile(onnx):
+        return onnx
+    # 3. Original .pt
+    return pt_path
+
+# Alias for any code still referencing the old name
+_prefer_optimized = _prefer_onnx
+
+
+# ── Model paths — prefer .onnx, fall back to .pt ──────────────────────────────
+HELMET_MODEL_PATH = _prefer_onnx(os.path.join(BASE_DIR, "helmet.pt"))
+VEST_MODEL_PATH   = _prefer_onnx(os.path.join(BASE_DIR, "yolov8_vest_small.pt"))
+PERSON_MODEL_PATH = _prefer_onnx(os.path.join(BASE_DIR, "yolov8n.pt"))   # fallback if pose not available
+
+# ── Inference settings — pulled from config so 320/640 change in one place ──
+from app.config import settings as _cfg
+BASE_CONF       = 0.10
+INFERENCE_IMGSZ = _cfg.input_size   # 320 (set in config.py) gives ~2x speedup
+IOU_THRESHOLD   = 0.5
+CAM_SIZE        = (640, 360)
 
 USE_GPU  = torch.cuda.is_available()
 USE_FP16 = False
@@ -92,9 +120,11 @@ def _ensure_models():
             _model_helmet = YOLO(HELMET_MODEL_PATH)
             _model_vest   = YOLO(VEST_MODEL_PATH)
 
-            # Try pose model first, fall back to yolov8n
+            # Try pose model first (ONNX preferred), fall back to yolov8n
+            pose_pt   = os.path.join(BASE_DIR, "yolov8n-pose.pt")
+            pose_path = _prefer_onnx(pose_pt)
             try:
-                _model_person = YOLO(os.path.join(BASE_DIR, "yolov8n-pose.pt"))
+                _model_person = YOLO(pose_path)
             except Exception:
                 _model_person = YOLO(PERSON_MODEL_PATH)
 

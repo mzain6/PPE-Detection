@@ -6,13 +6,46 @@ import os
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+def _prefer_optimized(pt_path: str) -> str:
+    """
+    Model format preference chain: OpenVINO > ONNX > PyTorch (.pt)
+
+    OpenVINO is Intel-CPU-optimised and runs 2-4x faster than ONNX on i5/i7/i9.
+    ONNX Runtime is the fallback if OpenVINO hasn't been exported yet.
+    Falls back to .pt if neither has been exported, so the system always starts.
+    """
+    if not pt_path or not pt_path.endswith(".pt"):
+        return pt_path  # already an optimised format or unknown — leave as-is
+    base      = pt_path[:-3]           # strip .pt
+    stem      = os.path.basename(base)
+    dir_path  = os.path.dirname(pt_path)
+
+    # 1. OpenVINO IR directory (created by export_to_openvino.py)
+    ov_dir = os.path.join(dir_path, f"{stem}_openvino_model")
+    if os.path.isdir(ov_dir):
+        return ov_dir
+
+    # 2. ONNX file (created by export_to_onnx.py)
+    onnx_path = base + ".onnx"
+    if os.path.isfile(onnx_path):
+        return onnx_path
+
+    # 3. Original PyTorch weights — always safe fallback
+    return pt_path
+
+
+# Keep old name as alias so any external code that imported it still works
+_prefer_onnx = _prefer_optimized
+
+
 class Settings:
     # path to yaml config file (relative to repo root)
     config_path: str = "config.yaml"
 
-    # model
-    model_path: str = os.path.join(BASE_DIR, "models", "custom", "helmet.pt")
-    input_size: int = 640
+    # model — _prefer_optimized() selects OpenVINO > ONNX > .pt at runtime
+    model_path: str = _prefer_optimized(os.path.join(BASE_DIR, "models", "custom", "helmet.pt"))
+    input_size: int = 320   # 320 gives ~2x speedup vs 640 with minimal accuracy drop
     device: str = "auto"
     confidence_threshold: float = 0.25
     iou_threshold: float = 0.45
@@ -86,7 +119,8 @@ class Settings:
             data = yaml.safe_load(f) or {}
 
         m = data.get("model", {})
-        self.model_path = m.get("path", self.model_path)
+        # Apply optimised format preference: OpenVINO > ONNX > .pt
+        self.model_path = _prefer_optimized(m.get("path", self.model_path))
         self.input_size = m.get("input_size", self.input_size)
         self.device = m.get("device", self.device)
         self.confidence_threshold = m.get("conf_threshold", self.confidence_threshold)

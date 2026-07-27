@@ -83,17 +83,20 @@ class VideoStream:
         self.cap: Optional[cv2.VideoCapture] = None
         self.ffmpeg: Optional[_FFMPEGProcess] = None
         self.last_read: Optional[float] = None
+        self.consecutive_failures: int = 0
 
     def start(self) -> "VideoStream":
         # If webcam (int), open cv2 capture
         if isinstance(self.source, int):
             if self.cap is None or not getattr(self.cap, "isOpened", lambda: False)():
                 self.cap = cv2.VideoCapture(int(self.source))
+                self.consecutive_failures = 0
         else:
             # Try cv2 first
             if self.cap is None or not getattr(self.cap, "isOpened", lambda: False)():
                 try:
                     self.cap = cv2.VideoCapture(str(self.source), self.backend)
+                    self.consecutive_failures = 0
                 except Exception:
                     self.cap = None
             # If cv2 cannot open, prepare ffmpeg process lazily
@@ -114,14 +117,25 @@ class VideoStream:
             self.start()
         # Try cv2 capture
         if self.cap is not None and getattr(self.cap, "isOpened", lambda: False)():
-            deadline = time.time() + float(timeout)
-            while time.time() < deadline:
+            try:
                 ret, frame = self.cap.read()
                 if ret and frame is not None:
                     self.last_read = time.time()
+                    self.consecutive_failures = 0
                     return frame
-                time.sleep(max(0.01, 1.0 / (self.fps * 2)))
-            # cv2 failed to provide a frame within timeout; try ffmpeg fallback
+                else:
+                    self.consecutive_failures += 1
+                    # Only release after repeated consecutive failures to allow camera hardware warmup
+                    if self.consecutive_failures >= 10:
+                        try:
+                            self.cap.release()
+                        except Exception:
+                            pass
+                        self.cap = None
+            except Exception:
+                self.consecutive_failures += 1
+                if self.consecutive_failures >= 10:
+                    self.cap = None
         # FFmpeg fallback
         if self.ffmpeg is None:
             self.start()  # may start ffmpeg

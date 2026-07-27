@@ -67,6 +67,12 @@ def list_cameras() -> List[Dict]:
 def get_stream(camera_id: str) -> Optional[VideoStream]:
     return _video_streams.get(camera_id)
 
+def _parse_webcam_idx(src) -> int:
+    try:
+        return int(src)
+    except Exception:
+        return 0
+
 def ensure_stream(camera_id: str) -> VideoStream:
     rec = _camera_registry.get(camera_id)
     if not rec:
@@ -74,7 +80,7 @@ def ensure_stream(camera_id: str) -> VideoStream:
     stream = _video_streams.get(camera_id)
     if stream is None:
         if rec.get("source_type") == "WEBCAM":
-            stream = VideoStream.from_webcam(int(rec["source"]), fps=rec.get("fps", settings.default_fps))
+            stream = VideoStream.from_webcam(_parse_webcam_idx(rec["source"]), fps=rec.get("fps", settings.default_fps))
         else:
             stream = VideoStream.from_rtsp(str(rec["source"]), fps=rec.get("fps", settings.default_fps))
         _video_streams[camera_id] = stream
@@ -91,7 +97,7 @@ def reset_stream(camera_id: str) -> VideoStream:
     except Exception:
         logger.exception("Error releasing existing stream for %s", camera_id)
     if rec.get("source_type") == "WEBCAM":
-        stream = VideoStream.from_webcam(int(rec["source"]), fps=rec.get("fps", settings.default_fps))
+        stream = VideoStream.from_webcam(_parse_webcam_idx(rec["source"]), fps=rec.get("fps", settings.default_fps))
     else:
         stream = VideoStream.from_rtsp(str(rec["source"]), fps=rec.get("fps", settings.default_fps))
     _video_streams[camera_id] = stream
