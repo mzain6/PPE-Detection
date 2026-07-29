@@ -19,4 +19,4 @@ Write-Host "[INFO] Working directory: src\" -ForegroundColor Yellow
 
 # Run from the src directory so imports resolve correctly
 Set-Location src
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level info
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level info

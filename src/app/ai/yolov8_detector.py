@@ -233,7 +233,7 @@ class YoloV8Detector(Detector):
         import torch
         with torch.inference_mode():
             if self.use_separate_models:
-                # TWO-MODEL PIPELINE: person detection + PPE detection
+                # TWO-MODEL PIPELINE: Full-frame Person + PPE detection for accurate bbox placement
                 # Step 1: Detect persons using person model
                 person_results = self.person_model(frame, imgsz=settings.input_size, verbose=False)
                 person_detections = self._parse_results(person_results, frame.shape)
@@ -241,45 +241,44 @@ class YoloV8Detector(Detector):
                 persons = []
                 for d in person_detections:
                     lbl = d.get("label", "")
-                    # Standard YOLO uses person class
-                    if lbl == "person" and d.get("conf", 0.0) >= self.conf_thresh:
+                    if lbl in ("person", "Person") and d.get("conf", 0.0) >= self.conf_thresh:
                         persons.append({"bbox": d["bbox"], "conf": d["conf"], "ppe": []})
                 
-                # Step 2: For each person, detect PPE in their crop
-                h, w = frame.shape[:2]
-                for person in persons:
-                    bbox = person["bbox"]
-                    x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                # Step 2: Detect PPE items (helmets, vests) on full frame
+                ppe_results = self.ppe_model(frame, imgsz=settings.input_size, verbose=False)
+                ppe_detections = self._parse_results(ppe_results, frame.shape)
+                
+                for ppe in ppe_detections:
+                    ppe_label = ppe.get("label", "")
+                    ppe_conf = ppe.get("conf", 0.0)
                     
-                    # Bounds check
-                    x1 = max(0, min(x1, w-1))
-                    y1 = max(0, min(y1, h-1))
-                    x2 = max(x1+1, min(x2, w))
-                    y2 = max(y1+1, min(y2, h))
-                    
-                    # Extract person crop
-                    person_crop = frame[y1:y2, x1:x2]
-                    
-                    if person_crop.size > 0:
-                        # Detect PPE in person crop
-                        ppe_results = self.ppe_model(person_crop, imgsz=settings.input_size, verbose=False)
-                        ppe_detections = self._parse_results(ppe_results, person_crop.shape)
+                    if ppe_label in self.ppe_labels and ppe_conf >= self.ppe_conf_thresh:
+                        # Match PPE box to overlapping or nearest person box
+                        best_person = None
+                        best_iou = -1.0
+                        for person in persons:
+                            ov = iou_helper(ppe["bbox"], person["bbox"])
+                            if ov > best_iou:
+                                best_iou = ov
+                                best_person = person
                         
-                        # Convert PPE bbox from crop coordinates to frame coordinates
-                        for ppe in ppe_detections:
-                            ppe_label = ppe.get("label", "")
-                            ppe_conf = ppe.get("conf", 0.0)
-                            
-                            if ppe_label in self.ppe_labels and ppe_conf >= self.ppe_conf_thresh:
-                                # Convert crop bbox to frame bbox
-                                cx1, cy1, cx2, cy2 = ppe["bbox"]
-                                frame_bbox = (x1 + cx1, y1 + cy1, x1 + cx2, y1 + cy2)
-                                
-                                person["ppe"].append({
+                        if best_person is not None:
+                            best_person["ppe"].append({
+                                "label": ppe_label,
+                                "confidence": float(ppe_conf),
+                                "bbox": ppe["bbox"]
+                            })
+                        else:
+                            # Standalone PPE box if person model missed full body
+                            persons.append({
+                                "bbox": ppe["bbox"],
+                                "conf": float(ppe_conf),
+                                "ppe": [{
                                     "label": ppe_label,
                                     "confidence": float(ppe_conf),
-                                    "bbox": frame_bbox
-                                })
+                                    "bbox": ppe["bbox"]
+                                }]
+                            })
             else:
                 # SINGLE-MODEL MODE (backward compatibility)
                 results = self.model(frame, imgsz=settings.input_size, verbose=False)

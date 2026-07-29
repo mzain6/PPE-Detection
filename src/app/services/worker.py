@@ -141,12 +141,7 @@ class CameraWorker:
                         if frame is None:
                             continue
 
-                    # ── Push raw frame immediately so the stream is NEVER black ──
-                    # The annotated frame (with boxes) is pushed again below after inference.
-                    try:
-                        set_frame(cam_id, frame.copy())
-                    except Exception:
-                        logger.exception("Failed to set raw frame for %s", cam_id)
+                    # Run inference synchronously and push only the annotated frame (prevents box blinking)
 
                     # run inference synchronously using pipeline_manager.infer_sync
                     try:
@@ -156,12 +151,35 @@ class CameraWorker:
                         import cv2
                         annotated = frame.copy()
                         for track in res.get("tracks", []):
-                            # Draw person box
                             pb = track.get("bbox", {})
                             if pb:
                                 px1, py1, px2, py2 = int(pb.get("x1",0)), int(pb.get("y1",0)), int(pb.get("x2",0)), int(pb.get("y2",0))
+                                
+                                # Derive face/head box for Person ID representation
+                                head_box = None
+                                for ppe in track.get("ppe", []):
+                                    if ppe.get("label") in ("Hardhat", "NO-Hardhat", "head", "helmet", "hi-viz helmet"):
+                                        ppeb = ppe.get("bbox", [0,0,0,0])
+                                        if len(ppeb) == 4:
+                                            head_box = ppeb
+                                            break
+                                
+                                if head_box:
+                                    hx1, hy1, hx2, hy2 = int(head_box[0]), int(head_box[1]), int(head_box[2]), int(head_box[3])
+                                    hw = hx2 - hx1
+                                    hh = hy2 - hy1
+                                    fx1 = max(0, hx1 - int(hw * 0.15))
+                                    fy1 = max(0, hy1 + int(hh * 0.25))
+                                    fx2 = min(annotated.shape[1], hx2 + int(hw * 0.15))
+                                    fy2 = min(annotated.shape[0], hy1 + int(hh * 2.8))
+                                else:
+                                    fx1, fy1, fx2, fy2 = px1, py1, px2, py1 + int((py2 - py1) * 0.45)
+                                
                                 color = (0, 0, 255) if track.get("fall") else (0, 255, 0)
-                                cv2.rectangle(annotated, (px1, py1), (px2, py2), color, 2)
+                                tid = track.get("track_id", 1)
+                                cv2.rectangle(annotated, (fx1, fy1), (fx2, fy2), color, 2)
+                                cv2.putText(annotated, f"Person #{tid}", (fx1, max(15, fy1 - 8)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
                             
                             # Draw PPE boxes
                             for ppe in track.get("ppe", []):
@@ -170,7 +188,7 @@ class CameraWorker:
                                     cx1, cy1, cx2, cy2 = int(ppeb[0]), int(ppeb[1]), int(ppeb[2]), int(ppeb[3])
                                     lbl = ppe.get("label", "")
                                     conf = ppe.get("confidence", 0.0)
-                                    ppe_color = (0, 255, 0) if lbl == "Hardhat" or lbl == "Safety Vest" else (0, 0, 255)
+                                    ppe_color = (0, 255, 0) if lbl in ("Hardhat", "Safety Vest", "helmet", "vest", "hi-viz helmet", "hi-viz vest") else (0, 0, 255)
                                     cv2.rectangle(annotated, (cx1, cy1), (cx2, cy2), ppe_color, 2)
                                     cv2.putText(annotated, f"{lbl} ({conf:.0%})", (cx1, cy2 + 16),
                                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, ppe_color, 1)

@@ -45,7 +45,7 @@ class PipelineManager:
         import os
         from app.config import BASE_DIR
         person_model_path = getattr(settings, "person_model_path", os.path.join(BASE_DIR, "models", "custom", "yolov8n.pt"))
-        ppe_model_path = getattr(settings, "ppe_model_path", os.path.join(BASE_DIR, "models", "custom", "best1.pt"))
+        ppe_model_path = getattr(settings, "ppe_model_path", os.path.join(BASE_DIR, "models", "custom", "check.pt"))
         
         import os
         if not os.path.exists(person_model_path) or not os.path.exists(ppe_model_path):
