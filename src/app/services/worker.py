@@ -88,6 +88,9 @@ class CameraWorker:
                 cam_id = cam.get("camera_id")
                 if not cam_id:
                     continue
+                t_start = time.time()
+                target_fps = int(cam.get("fps", 15)) or 15
+                interval = 1.0 / float(target_fps)
                 
                 # Check if it was removed or deactivated
                 if not any(str(c.id) == cam_id for c in db_cams):
@@ -185,12 +188,20 @@ class CameraWorker:
 
                     # update last frame time and persist already done by pipeline_manager via detection_store
                     update_last_frame_time(cam_id)
-                    logger.info("Processed frame for %s source_type=%s fps=%s tracks=%s",
-                                cam_id, cam.get("source_type"), cam.get("fps"), len(res.get("tracks", [])))
+                    logger.debug("Processed frame for %s source_type=%s fps=%s tracks=%s",
+                                 cam_id, cam.get("source_type"), cam.get("fps"), len(res.get("tracks", [])))
                 except Exception:
                     logger.exception("Unhandled error processing camera %s", cam.get("camera_id"))
                     continue
-            time.sleep(self.poll_interval)
+                finally:
+                    elapsed = time.time() - t_start
+                    sleep_needed = interval - elapsed
+                    if sleep_needed > 0:
+                        time.sleep(sleep_needed)
+            
+            # Sleep briefly when no cameras configured
+            if not cams:
+                time.sleep(0.5)
 
 # singleton worker instance
-worker = CameraWorker(poll_interval=max(0.5, 1.0 / settings.default_fps))
+worker = CameraWorker(poll_interval=0.01)
