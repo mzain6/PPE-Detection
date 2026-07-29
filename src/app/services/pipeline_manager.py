@@ -85,10 +85,10 @@ class PipelineManager:
     def infer_sync(self, camera_id: str, frame, timeout: Optional[float] = 15.0) -> Dict:
         """
         Synchronous inference for blocking routes/workers.
+        Runs directly on the detector without queuing in ThreadPoolExecutor.
         """
         det = self.get_detector(camera_id)
-        future: Future = self.executor.submit(det.infer, frame)
-        res = future.result(timeout=timeout)
+        res = det.infer(frame)
         if "camera_id" not in res:
             res["camera_id"] = camera_id
         detection_store.mark_started(camera_id)

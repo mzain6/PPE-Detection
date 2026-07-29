@@ -44,7 +44,7 @@ def set_frame(camera_id: str, frame: np.ndarray) -> int:
     e = _ensure_entry(camera_id)
     with e.lock:
         # copy frame to avoid shared-memory issues
-        e.frame = copy.deepcopy(frame)
+        e.frame = frame.copy()
         e.seq += 1
         e.last_update = time.time()
         e.cond.notify_all()
@@ -63,13 +63,13 @@ def get_frame(camera_id: str, wait_for_seq: Optional[int] = None, timeout: Optio
     e = _ensure_entry(camera_id)
     with e.lock:
         if wait_for_seq is None:
-            return (copy.deepcopy(e.frame) if e.frame is not None else None, e.seq)
+            return (e.frame.copy() if e.frame is not None else None, e.seq)
         # wait until a new seq is available
         if e.seq > wait_for_seq:
-            return (copy.deepcopy(e.frame) if e.frame is not None else None, e.seq)
+            return (e.frame.copy() if e.frame is not None else None, e.seq)
         # wait with timeout
         waited = e.cond.wait_for(lambda: e.seq > wait_for_seq, timeout=timeout)
-        return (copy.deepcopy(e.frame) if e.frame is not None else None, e.seq)
+        return (e.frame.copy() if e.frame is not None else None, e.seq)
 
 def get_last_update(camera_id: str) -> Optional[float]:
     e = _ensure_entry(camera_id)

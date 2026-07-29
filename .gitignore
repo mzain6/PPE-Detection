@@ -80,6 +80,7 @@ coverage.xml
 # Environment variables
 .env
 .env.local
+*.db
 
 # Excluded model files (tracked via Git LFS)
 # check.pt, best1.pt, yolov8m-face-lindevs.pt are now allowed

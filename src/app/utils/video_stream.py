@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import subprocess
 import threading
-import io
+import os
 
 def frame_to_bgr(frame_bytes: bytes) -> Optional[np.ndarray]:
     if not frame_bytes:
@@ -36,19 +36,14 @@ class _FFMPEGProcess:
                 "-vcodec", "mjpeg",
                 "-"
             ]
-            # stderr suppressed to avoid noise; ensure stdout is a pipe
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     def read_jpeg_frame(self, timeout: float = 5.0) -> Optional[bytes]:
-        """
-        Read one JPEG frame from stdout by searching JPEG SOI/EOI markers.
-        """
         if self.proc is None or self.proc.stdout is None:
             return None
         start = time.time()
         data = b""
         stdout = self.proc.stdout
-        # Read until we find a full JPEG (0xFFD8 ... 0xFFD9) or timeout
         while time.time() - start < timeout:
             chunk = stdout.read(4096)
             if not chunk:
@@ -59,7 +54,6 @@ class _FFMPEGProcess:
             eoi = data.find(b"\xff\xd9")
             if soi != -1 and eoi != -1 and eoi > soi:
                 jpeg = data[soi:eoi + 2]
-                # keep remainder in buffer by seeking back (not possible), so just drop
                 return jpeg
         return None
 
@@ -74,64 +68,94 @@ class _FFMPEGProcess:
 
 class VideoStream:
     """
-    Unified VideoStream supporting webcam (device index) and RTSP URL with ffmpeg fallback.
+    Threaded VideoStream supporting webcam (device index) and RTSP URL with zero-buffer latency.
+    A background thread continuously reads frames so read() always returns the latest frame instantly.
     """
-    def __init__(self, source: Union[int, str], fps: int = 5, backend: int = cv2.CAP_FFMPEG):
+    def __init__(self, source: Union[int, str], fps: int = 15, backend: int = cv2.CAP_FFMPEG):
+        if isinstance(source, str) and source.strip().isdigit():
+            source = int(source.strip())
         self.source = source
-        self.fps = max(1, int(fps) if fps else 1)
+        self.fps = max(1, int(fps) if fps else 15)
         self.backend = backend
         self.cap: Optional[cv2.VideoCapture] = None
         self.ffmpeg: Optional[_FFMPEGProcess] = None
         self.last_read: Optional[float] = None
+        
+        self._latest_frame: Optional[np.ndarray] = None
+        self._frame_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._worker_thread: Optional[threading.Thread] = None
 
     def start(self) -> "VideoStream":
-        # If webcam (int), open cv2 capture
+        if self._worker_thread and self._worker_thread.is_alive():
+            return self
+        
+        self._stop_event.clear()
+        
+        # Open OpenCV capture
         if isinstance(self.source, int):
-            if self.cap is None or not getattr(self.cap, "isOpened", lambda: False)():
-                self.cap = cv2.VideoCapture(int(self.source))
+            self.cap = cv2.VideoCapture(int(self.source))
+            if (self.cap is None or not getattr(self.cap, "isOpened", lambda: False)()) and os.name == "nt":
+                self.cap = cv2.VideoCapture(int(self.source), cv2.CAP_DSHOW)
         else:
-            # Try cv2 first
-            if self.cap is None or not getattr(self.cap, "isOpened", lambda: False)():
-                try:
-                    self.cap = cv2.VideoCapture(str(self.source), self.backend)
-                except Exception:
-                    self.cap = None
-            # If cv2 cannot open, prepare ffmpeg process lazily
-            if (self.cap is None or not getattr(self.cap, "isOpened", lambda: False)()) and self.ffmpeg is None:
-                self.ffmpeg = _FFMPEGProcess(str(self.source))
-                try:
-                    self.ffmpeg.start()
-                except Exception:
-                    # ignore; ffmpeg may not be installed
-                    self.ffmpeg = None
+            if str(self.source).startswith("rtsp://"):
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+            try:
+                self.cap = cv2.VideoCapture(str(self.source), self.backend)
+            except Exception:
+                self.cap = None
+
+        if self.cap and getattr(self.cap, "isOpened", lambda: False)():
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        # Fall back to FFmpeg if cv2 failed
+        if (self.cap is None or not getattr(self.cap, "isOpened", lambda: False)()) and not isinstance(self.source, int):
+            self.ffmpeg = _FFMPEGProcess(str(self.source))
+            try:
+                self.ffmpeg.start()
+            except Exception:
+                self.ffmpeg = None
+
+        # Start background grabber thread to prevent buffer buildup
+        self._worker_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._worker_thread.start()
         return self
 
-    def read(self, timeout: float = 5.0) -> Optional[np.ndarray]:
+    def _capture_loop(self):
+        while not self._stop_event.is_set():
+            frame = None
+            if self.cap and getattr(self.cap, "isOpened", lambda: False)():
+                ret, img = self.cap.read()
+                if ret and img is not None:
+                    frame = img
+            elif self.ffmpeg:
+                jpeg = self.ffmpeg.read_jpeg_frame(timeout=0.2)
+                if jpeg:
+                    frame = frame_to_bgr(jpeg)
+            
+            if frame is not None:
+                with self._frame_lock:
+                    self._latest_frame = frame
+                    self.last_read = time.time()
+                time.sleep(0.005)
+            else:
+                time.sleep(0.03)
+
+    def read(self, timeout: float = 2.0) -> Optional[np.ndarray]:
         """
-        Attempt to read a single frame within `timeout`. Prefer cv2; fall back to ffmpeg-JPEG.
+        Return the latest real-time frame without buffering lag.
         """
-        if self.cap is None:
+        if not self._worker_thread or not self._worker_thread.is_alive():
             self.start()
-        # Try cv2 capture
-        if self.cap is not None and getattr(self.cap, "isOpened", lambda: False)():
-            deadline = time.time() + float(timeout)
-            while time.time() < deadline:
-                ret, frame = self.cap.read()
-                if ret and frame is not None:
-                    self.last_read = time.time()
-                    return frame
-                time.sleep(max(0.01, 1.0 / (self.fps * 2)))
-            # cv2 failed to provide a frame within timeout; try ffmpeg fallback
-        # FFmpeg fallback
-        if self.ffmpeg is None:
-            self.start()  # may start ffmpeg
-        if self.ffmpeg:
-            jpeg = self.ffmpeg.read_jpeg_frame(timeout=timeout)
-            if jpeg:
-                frame = frame_to_bgr(jpeg)
-                if frame is not None:
-                    self.last_read = time.time()
-                    return frame
+
+        deadline = time.time() + float(timeout)
+        while time.time() < deadline:
+            with self._frame_lock:
+                if self._latest_frame is not None:
+                    # Return latest frame
+                    frame = self._latest_frame
+                    return frame.copy()
+            time.sleep(0.01)
         return None
 
     def is_open(self) -> bool:
@@ -142,6 +166,10 @@ class VideoStream:
         return False
 
     def release(self) -> None:
+        self._stop_event.set()
+        if self._worker_thread:
+            self._worker_thread.join(timeout=1.0)
+            self._worker_thread = None
         try:
             if self.cap is not None:
                 self.cap.release()
@@ -155,9 +183,9 @@ class VideoStream:
             self.ffmpeg = None
 
     @classmethod
-    def from_rtsp(cls, url: str, fps: int = 5) -> "VideoStream":
+    def from_rtsp(cls, url: str, fps: int = 15) -> "VideoStream":
         return cls(source=url, fps=fps)
 
     @classmethod
-    def from_webcam(cls, index: int = 0, fps: int = 5) -> "VideoStream":
+    def from_webcam(cls, index: int = 0, fps: int = 15) -> "VideoStream":
         return cls(source=index, fps=fps)

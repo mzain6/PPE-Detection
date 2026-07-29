@@ -19,6 +19,8 @@ export default withAuth(
     return NextResponse.next();
   },
   {
+    // Explicitly pass the secret so withAuth can decrypt the JWT cookie
+    secret: process.env.NEXTAUTH_SECRET,
     callbacks: {
       authorized({ token, req }) {
         const { pathname } = req.nextUrl;

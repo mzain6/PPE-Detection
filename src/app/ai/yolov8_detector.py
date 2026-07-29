@@ -196,83 +196,85 @@ class YoloV8Detector(Detector):
             raise RuntimeError("model not loaded")
         ts = time.time()
         
-        if self.use_separate_models:
-            # TWO-MODEL PIPELINE: person detection + PPE detection
-            # Step 1: Detect persons using person model
-            person_results = self.person_model(frame, imgsz=settings.input_size, verbose=False)
-            person_detections = self._parse_results(person_results, frame.shape)
-            
-            persons = []
-            for d in person_detections:
-                lbl = d.get("label", "")
-                # Standard YOLO uses person class
-                if lbl == "person" and d.get("conf", 0.0) >= self.conf_thresh:
-                    persons.append({"bbox": d["bbox"], "conf": d["conf"], "ppe": []})
-            
-            # Step 2: For each person, detect PPE in their crop
-            h, w = frame.shape[:2]
-            for person in persons:
-                bbox = person["bbox"]
-                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+        import torch
+        with torch.inference_mode():
+            if self.use_separate_models:
+                # TWO-MODEL PIPELINE: person detection + PPE detection
+                # Step 1: Detect persons using person model
+                person_results = self.person_model(frame, imgsz=settings.input_size, verbose=False)
+                person_detections = self._parse_results(person_results, frame.shape)
                 
-                # Bounds check
-                x1 = max(0, min(x1, w-1))
-                y1 = max(0, min(y1, h-1))
-                x2 = max(x1+1, min(x2, w))
-                y2 = max(y1+1, min(y2, h))
+                persons = []
+                for d in person_detections:
+                    lbl = d.get("label", "")
+                    # Standard YOLO uses person class
+                    if lbl == "person" and d.get("conf", 0.0) >= self.conf_thresh:
+                        persons.append({"bbox": d["bbox"], "conf": d["conf"], "ppe": []})
                 
-                # Extract person crop
-                person_crop = frame[y1:y2, x1:x2]
-                
-                if person_crop.size > 0:
-                    # Detect PPE in person crop
-                    ppe_results = self.ppe_model(person_crop, imgsz=settings.input_size, verbose=False)
-                    ppe_detections = self._parse_results(ppe_results, person_crop.shape)
+                # Step 2: For each person, detect PPE in their crop
+                h, w = frame.shape[:2]
+                for person in persons:
+                    bbox = person["bbox"]
+                    x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
                     
-                    # Convert PPE bbox from crop coordinates to frame coordinates
-                    for ppe in ppe_detections:
-                        ppe_label = ppe.get("label", "")
-                        ppe_conf = ppe.get("conf", 0.0)
+                    # Bounds check
+                    x1 = max(0, min(x1, w-1))
+                    y1 = max(0, min(y1, h-1))
+                    x2 = max(x1+1, min(x2, w))
+                    y2 = max(y1+1, min(y2, h))
+                    
+                    # Extract person crop
+                    person_crop = frame[y1:y2, x1:x2]
+                    
+                    if person_crop.size > 0:
+                        # Detect PPE in person crop
+                        ppe_results = self.ppe_model(person_crop, imgsz=settings.input_size, verbose=False)
+                        ppe_detections = self._parse_results(ppe_results, person_crop.shape)
                         
-                        if ppe_label in self.ppe_labels and ppe_conf >= self.ppe_conf_thresh:
-                            # Convert crop bbox to frame bbox
-                            cx1, cy1, cx2, cy2 = ppe["bbox"]
-                            frame_bbox = (x1 + cx1, y1 + cy1, x1 + cx2, y1 + cy2)
+                        # Convert PPE bbox from crop coordinates to frame coordinates
+                        for ppe in ppe_detections:
+                            ppe_label = ppe.get("label", "")
+                            ppe_conf = ppe.get("conf", 0.0)
                             
-                            person["ppe"].append({
-                                "label": ppe_label,
-                                "confidence": float(ppe_conf),
-                                "bbox": frame_bbox
-                            })
-        else:
-            # SINGLE-MODEL MODE (backward compatibility)
-            results = self.model(frame, imgsz=settings.input_size, verbose=False)
-            parsed = self._parse_results(results, frame.shape)
-            persons = []
-            ppe_candidates = []
-            for d in parsed:
-                lbl = d.get("label", "")
-                if lbl == self.person_label and d.get("conf", 0.0) >= self.conf_thresh:
-                    persons.append({"bbox": d["bbox"], "conf": d["conf"], "ppe": []})
-                elif lbl in self.ppe_labels and d.get("conf", 0.0) >= self.ppe_conf_thresh:
-                    ppe_candidates.append(d)
-            # attach PPE
-            for ppe in ppe_candidates:
-                best_idx = None; best_iou = 0.0
-                for idx, per in enumerate(persons):
-                    try:
-                        ov = iou_helper(ppe["bbox"], per["bbox"])
-                    except Exception:
-                        ov = 0.0
-                    if ov > best_iou:
-                        best_iou = ov; best_idx = idx
-                if best_idx is not None and best_iou > 0.0:
-                    # Include bbox information for drawing separate boxes
-                    persons[best_idx].setdefault("ppe", []).append({
-                        "label": ppe["label"], 
-                        "confidence": float(ppe["conf"]),
-                        "bbox": ppe["bbox"]  # Add bbox for separate visualization
-                    })
+                            if ppe_label in self.ppe_labels and ppe_conf >= self.ppe_conf_thresh:
+                                # Convert crop bbox to frame bbox
+                                cx1, cy1, cx2, cy2 = ppe["bbox"]
+                                frame_bbox = (x1 + cx1, y1 + cy1, x1 + cx2, y1 + cy2)
+                                
+                                person["ppe"].append({
+                                    "label": ppe_label,
+                                    "confidence": float(ppe_conf),
+                                    "bbox": frame_bbox
+                                })
+            else:
+                # SINGLE-MODEL MODE (backward compatibility)
+                results = self.model(frame, imgsz=settings.input_size, verbose=False)
+                parsed = self._parse_results(results, frame.shape)
+                persons = []
+                ppe_candidates = []
+                for d in parsed:
+                    lbl = d.get("label", "")
+                    if lbl == self.person_label and d.get("conf", 0.0) >= self.conf_thresh:
+                        persons.append({"bbox": d["bbox"], "conf": d["conf"], "ppe": []})
+                    elif lbl in self.ppe_labels and d.get("conf", 0.0) >= self.ppe_conf_thresh:
+                        ppe_candidates.append(d)
+                # attach PPE
+                for ppe in ppe_candidates:
+                    best_idx = None; best_iou = 0.0
+                    for idx, per in enumerate(persons):
+                        try:
+                            ov = iou_helper(ppe["bbox"], per["bbox"])
+                        except Exception:
+                            ov = 0.0
+                        if ov > best_iou:
+                            best_iou = ov; best_idx = idx
+                    if best_idx is not None and best_iou > 0.0:
+                        # Include bbox information for drawing separate boxes
+                        persons[best_idx].setdefault("ppe", []).append({
+                            "label": ppe["label"], 
+                            "confidence": float(ppe["conf"]),
+                            "bbox": ppe["bbox"]  # Add bbox for separate visualization
+                        })
         
         # Rest of the method continues the same...
         # update tracker (if available)

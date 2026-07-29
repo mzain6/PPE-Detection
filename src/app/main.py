@@ -127,15 +127,25 @@ async def read_alerts_dashboard():
 async def startup_event():
     logger.info("Starting SafeSite AI API v2.0...")
 
-    # Run DB migrations
+    # Create / migrate database tables
     try:
-        from alembic.config import Config
-        from alembic import command
-        alembic_cfg = Config("alembic.ini")
-        command.upgrade(alembic_cfg, "head")
-        logger.info("Database migrations applied successfully")
+        from app.database import engine, DATABASE_URL
+        if "sqlite" in DATABASE_URL.lower():
+            # SQLite: use SQLAlchemy create_all (fast, no migration tool needed)
+            from app.database import Base
+            import app.models  # ensure all models are registered  # noqa: F401
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("SQLite database tables created/verified successfully")
+        else:
+            # PostgreSQL: use Alembic migrations
+            from alembic.config import Config
+            from alembic import command
+            alembic_cfg = Config("alembic.ini")
+            command.upgrade(alembic_cfg, "head")
+            logger.info("Database migrations applied successfully")
     except Exception as e:
-        logger.warning(f"Alembic migration skipped (DB may not be configured yet): {e}")
+        logger.warning(f"DB setup skipped: {e}")
 
     # GPU detection
     try:
