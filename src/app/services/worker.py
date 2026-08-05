@@ -199,6 +199,110 @@ class CameraWorker:
                         except Exception:
                             logger.exception("Failed to set annotated frame for %s", cam_id)
 
+                        # ── Automatic 4-5s Evidence Video Clip Recorder ──
+                        if not hasattr(self, "_frame_buffers"):
+                            import collections
+                            self._frame_buffers = collections.defaultdict(lambda: collections.deque(maxlen=75))
+                        if not hasattr(self, "_violation_cooldowns"):
+                            self._violation_cooldowns = {}
+                        
+                        self._frame_buffers[cam_id].append(annotated.copy())
+
+                        for track in res.get("tracks", []):
+                            no_helmet = False
+                            no_vest = False
+                            for ppe in track.get("ppe", []):
+                                lbl = ppe.get("label", "")
+                                if lbl in ("NO-Hardhat", "no_helmet", "head"):
+                                    no_helmet = True
+                                elif lbl in ("NO-Safety Vest", "no_vest"):
+                                    no_vest = True
+                            
+                            is_fall = bool(track.get("fall", False))
+
+                            if no_helmet or no_vest or is_fall:
+                                from app.models import Violation, ViolationType
+                                if no_helmet and no_vest:
+                                    v_enum = ViolationType.no_both
+                                elif no_helmet:
+                                    v_enum = ViolationType.no_helmet
+                                elif no_vest:
+                                    v_enum = ViolationType.no_vest
+                                else:
+                                    v_enum = ViolationType.no_helmet
+                                
+                                tid = track.get("track_id", 1)
+                                cooldown_key = (cam_id, tid, v_enum.value)
+                                last_rec = self._violation_cooldowns.get(cooldown_key, 0.0)
+
+                                if now - last_rec > 180.0:  # 3 minutes break (180 seconds) per person per violation type
+                                    self._violation_cooldowns[cooldown_key] = now
+                                    import os, uuid, cv2
+                                    from uuid import UUID
+                                    from datetime import datetime
+                                    from app.models import Violation
+
+                                    os.makedirs("evidence", exist_ok=True)
+                                    v_uuid = str(uuid.uuid4())
+                                    img_rel_path = f"evidence/violation_{v_uuid}.jpg"
+                                    vid_rel_path = f"evidence/violation_{v_uuid}.mp4"
+
+                                    # 1. Save screenshot
+                                    cv2.imwrite(img_rel_path, annotated)
+
+                                    # 2. Save 4-5s H.264 video clip (HTML5 Web compatible)
+                                    buf = list(self._frame_buffers[cam_id])
+                                    if buf:
+                                        vh, vw, _ = buf[0].shape
+                                        try:
+                                            import subprocess, imageio_ffmpeg
+                                            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                                            cmd = [
+                                                ffmpeg_exe, "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+                                                "-s", f"{vw}x{vh}", "-pix_fmt", "bgr24", "-r", "15",
+                                                "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                                                "-preset", "ultrafast", vid_rel_path
+                                            ]
+                                            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+                                            for bf in buf:
+                                                proc.stdin.write(bf.tobytes())
+                                            proc.stdin.close()
+                                            proc.wait()
+                                        except Exception:
+                                            logger.exception("FFmpeg H264 encoding failed, falling back to OpenCV")
+                                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                            vw_out = cv2.VideoWriter(vid_rel_path, fourcc, 15.0, (vw, vh))
+                                            for bf in buf:
+                                                vw_out.write(bf)
+                                            vw_out.release()
+
+                                    # 3. Persist Violation to DB
+                                    async def _save_violation():
+                                        async with WorkerSessionLocal() as db:
+                                            cam_obj = next((c for c in db_cams if str(c.id) == str(cam_id)), None)
+                                            site_id = cam_obj.site_id if cam_obj else UUID("00000000-0000-0000-0000-000000000000")
+                                            
+                                            v_rec = Violation(
+                                                id=UUID(v_uuid),
+                                                camera_id=UUID(cam_id),
+                                                site_id=site_id,
+                                                track_id=int(tid),
+                                                violation_type=v_enum,
+                                                confidence=0.90,
+                                                screenshot_path=img_rel_path,
+                                                evidence_video_path=vid_rel_path,
+                                                is_reviewed=False,
+                                                timestamp=datetime.utcnow()
+                                            )
+                                            db.add(v_rec)
+                                            await db.commit()
+
+                                    try:
+                                        loop.run_until_complete(_save_violation())
+                                        logger.info("📹 Recorded 4-5s violation clip: %s (%s)", vid_rel_path, v_enum.value)
+                                    except Exception:
+                                        logger.exception("Failed to save violation record to DB")
+
                     except Exception:
                         logger.exception("Inference failed for %s", cam_id)
                         # Raw frame already pushed above — stream still shows video

@@ -106,16 +106,19 @@ async def violation_trend(
 ):
     start = datetime.utcnow() - timedelta(days=days)
     query = (
-        select(
-            cast(Violation.timestamp, Date).label("day"),
-            func.count().label("count")
-        )
+        select(Violation.timestamp)
         .where(Violation.timestamp >= start)
-        .group_by(cast(Violation.timestamp, Date))
-        .order_by(cast(Violation.timestamp, Date))
+        .order_by(Violation.timestamp.asc())
     )
-    rows = (await db.execute(query)).all()
-    return [TrendItem(date=str(r[0]), count=r[1]) for r in rows]
+    rows = (await db.execute(query)).scalars().all()
+    
+    counts_by_date = {}
+    for ts in rows:
+        if ts:
+            d_str = ts.strftime("%Y-%m-%d")
+            counts_by_date[d_str] = counts_by_date.get(d_str, 0) + 1
+
+    return [TrendItem(date=d, count=c) for d, c in counts_by_date.items()]
 
 
 @router.get("/peak-hours", response_model=List[PeakHourCell])

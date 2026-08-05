@@ -1,20 +1,27 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
-import { Download, Eye, CheckSquare } from "lucide-react";
+import { Download, Eye, CheckSquare, Film, AlertTriangle, Calendar, Video, ShieldAlert } from "lucide-react";
 import DataTable from "@/components/ui/DataTable";
 import Modal from "@/components/ui/Modal";
 import { ViolationBadge } from "@/components/ui/Badge";
 import { apiFetch, API_BASE } from "@/lib/api";
 import { useAlertStore } from "@/store/alertStore";
 
-const VIOLATION_TYPES = ["all", "no_helmet", "no_vest", "no_gloves", "no_both"];
+const VIOLATION_TYPES = ["all", "NO_HELMET", "NO_VEST", "NO_BOTH", "FALL_DETECTED"];
 
 function ConfidenceCell({ value }) {
   const pct = (value * 100).toFixed(1);
   const color = value > 0.8 ? "var(--color-success)" : value > 0.6 ? "var(--color-warning)" : "var(--color-danger)";
-  return <span className="text-mono" style={{ color }}>{pct}%</span>;
+  return <span className="text-mono" style={{ color, fontWeight: 600 }}>{pct}%</span>;
 }
+
+const getMediaUrl = (path) => {
+  if (!path) return null;
+  if (path.startsWith("http")) return path;
+  const clean = path.startsWith("/") ? path.slice(1) : path;
+  return `${API_BASE}/${clean}`;
+};
 
 export default function ViolationsPage() {
   const { data: session } = useSession();
@@ -22,6 +29,8 @@ export default function ViolationsPage() {
   const [data, setData] = useState({ items: [], total: 0, total_pages: 1 });
   const [loading, setLoading] = useState(true);
   const [cameras, setCameras] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [trendData, setTrendData] = useState([]);
   const [filters, setFilters] = useState({
     date_from: "",
     date_to: "",
@@ -33,9 +42,12 @@ export default function ViolationsPage() {
   const [pageSize, setPageSize] = useState(25);
   const [selectedViolation, setSelectedViolation] = useState(null);
 
+  // Load initial options & daily stats
   useEffect(() => {
     if (!session) return;
     apiFetch("/api/cameras", {}, session).then(setCameras).catch(() => {});
+    apiFetch("/api/analytics/summary", {}, session).then(setSummary).catch(() => {});
+    apiFetch("/api/analytics/trend?days=7", {}, session).then(setTrendData).catch(() => {});
   }, [session]);
 
   const loadViolations = useCallback(async () => {
@@ -61,6 +73,8 @@ export default function ViolationsPage() {
       await apiFetch(`/api/violations/${id}/review`, { method: "PATCH" }, session);
       addToast({ type: "success", message: "Marked as reviewed" });
       loadViolations();
+      // refresh summary
+      apiFetch("/api/analytics/summary", {}, session).then(setSummary).catch(() => {});
       setSelectedViolation(null);
     } catch { addToast({ type: "error", message: "Failed to update" }); }
   }
@@ -73,6 +87,9 @@ export default function ViolationsPage() {
     if (appliedFilters.camera_id) params.append("camera_id", appliedFilters.camera_id);
     window.open(`${API_BASE}/api/violations/export/csv?${params}`, "_blank");
   }
+
+  // Calculate 7-day total count
+  const sevenDayTotal = trendData.reduce((acc, curr) => acc + (curr.count || 0), 0);
 
   const columns = [
     {
@@ -93,14 +110,33 @@ export default function ViolationsPage() {
     {
       key: "person_name",
       label: "Person",
-      render: (v) => v
-        ? <span style={{ fontWeight: 600 }}>{v}</span>
-        : <span style={{ color: "var(--color-text-muted)", fontSize: "0.8rem" }}>Unknown</span>,
+      render: (v, row) => (
+        <span style={{ fontWeight: 600 }}>
+          {v || `Track #${row.track_id || 1}`}
+        </span>
+      ),
     },
     {
       key: "confidence",
       label: "Confidence",
       render: (v) => <ConfidenceCell value={v} />,
+    },
+    {
+      key: "evidence_video_path",
+      label: "Evidence Clip",
+      render: (v, row) => (
+        v || row.video_link ? (
+          <button
+            className="btn btn-secondary btn-sm"
+            style={{ color: "#38bdf8", borderColor: "#0284c733", display: "inline-flex", alignItems: "center", gap: 4 }}
+            onClick={(e) => { e.stopPropagation(); setSelectedViolation(row); }}
+          >
+            <Film size={13} /> Play Clip
+          </button>
+        ) : (
+          <span style={{ color: "var(--color-text-muted)", fontSize: "0.75rem" }}>Snapshot Only</span>
+        )
+      ),
     },
     {
       key: "is_reviewed",
@@ -127,13 +163,73 @@ export default function ViolationsPage() {
     <>
       <div className="page-header">
         <div>
-          <h2 className="page-title">Violations</h2>
-          <p className="page-subtitle">Full incident log with filtering and export</p>
+          <h2 className="page-title">Violations & Evidence Clips</h2>
+          <p className="page-subtitle">Daily incident logs with 4–5 second recorded evidence video clips</p>
         </div>
         <div style={{ display: "flex", gap: "0.5rem" }}>
           <button className="btn btn-secondary btn-sm" onClick={exportCSV}>
             <Download size={14} /> Export CSV
           </button>
+        </div>
+      </div>
+
+      {/* Daily Analytics Summary Cards */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+        gap: "1rem",
+        marginBottom: "1.5rem"
+      }}>
+        <div className="card" style={{ padding: "1.25rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+            <span style={{ fontSize: "0.8rem", color: "var(--color-text-muted)", fontWeight: 600 }}>TODAY'S VIOLATIONS</span>
+            <ShieldAlert size={18} style={{ color: "#ef4444" }} />
+          </div>
+          <div style={{ fontSize: "1.75rem", fontWeight: 700, color: "var(--color-text)" }}>
+            {summary ? summary.total_violations_today : "—"}
+          </div>
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "0.25rem" }}>
+            Recorded on active cameras today
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: "1.25rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+            <span style={{ fontSize: "0.8rem", color: "var(--color-text-muted)", fontWeight: 600 }}>7-DAY TOTAL</span>
+            <Calendar size={18} style={{ color: "#38bdf8" }} />
+          </div>
+          <div style={{ fontSize: "1.75rem", fontWeight: 700, color: "var(--color-text)" }}>
+            {sevenDayTotal || (summary ? summary.total_violations_today : 0)}
+          </div>
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "0.25rem" }}>
+            Aggregated past 7 days incidents
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: "1.25rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+            <span style={{ fontSize: "0.8rem", color: "var(--color-text-muted)", fontWeight: 600 }}>PENDING REVIEW</span>
+            <AlertTriangle size={18} style={{ color: "#f59e0b" }} />
+          </div>
+          <div style={{ fontSize: "1.75rem", fontWeight: 700, color: "#f59e0b" }}>
+            {summary ? summary.unreviewed_incidents : "—"}
+          </div>
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "0.25rem" }}>
+            Awaiting supervisor verification
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: "1.25rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+            <span style={{ fontSize: "0.8rem", color: "var(--color-text-muted)", fontWeight: 600 }}>ACTIVE CAMERAS</span>
+            <Video size={18} style={{ color: "#10b981" }} />
+          </div>
+          <div style={{ fontSize: "1.75rem", fontWeight: 700, color: "var(--color-text)" }}>
+            {summary ? `${summary.active_cameras} / ${summary.total_cameras}` : "—"}
+          </div>
+          <div style={{ fontSize: "0.75rem", color: "#10b981", marginTop: "0.25rem" }}>
+            AI Streams Live
+          </div>
         </div>
       </div>
 
@@ -193,23 +289,57 @@ export default function ViolationsPage() {
         onPageChange={setPage}
       />
 
-      {/* Violation Modal */}
+      {/* Violation Details & Video Clip Player Modal */}
       <Modal
         isOpen={!!selectedViolation}
         onClose={() => setSelectedViolation(null)}
-        title="Violation Details"
+        title="Violation Evidence & Clip Player"
         size="lg"
       >
         {selectedViolation && (
           <>
-            {selectedViolation.screenshot_path && (
+            {/* 4-5s Evidence Video Clip Player or Snapshot Fallback */}
+            {selectedViolation.evidence_video_path || selectedViolation.video_link ? (
+              <div style={{ position: "relative", backgroundColor: "#000", borderRadius: "8px 8px 0 0", overflow: "hidden" }}>
+                <video
+                  src={getMediaUrl(selectedViolation.evidence_video_path || selectedViolation.video_link)}
+                  controls
+                  autoPlay
+                  loop
+                  playsInline
+                  style={{ width: "100%", maxHeight: 350, display: "block" }}
+                />
+                <div style={{
+                  position: "absolute",
+                  top: 12,
+                  left: 12,
+                  background: "rgba(0,0,0,0.8)",
+                  color: "#38bdf8",
+                  padding: "4px 10px",
+                  borderRadius: 6,
+                  fontSize: "0.75rem",
+                  fontWeight: 600,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  border: "1px solid rgba(56,189,248,0.3)"
+                }}>
+                  <Film size={14} /> 4-5s Video Recording Evidence
+                </div>
+              </div>
+            ) : selectedViolation.screenshot_path ? (
               <img
-                src={`${API_BASE}/${selectedViolation.screenshot_path}`}
+                src={getMediaUrl(selectedViolation.screenshot_path)}
                 alt="Violation screenshot"
-                style={{ width: "100%", maxHeight: 300, objectFit: "cover", borderRadius: "0" }}
+                style={{ width: "100%", maxHeight: 300, objectFit: "cover", borderRadius: "8px 8px 0 0" }}
               />
+            ) : (
+              <div style={{ height: 160, display: "flex", alignItems: "center", justifyContent: "center", background: "#1e293b", color: "#94a3b8" }}>
+                No video or screenshot recorded for this incident
+              </div>
             )}
-            <div className="modal-body">
+
+            <div className="modal-body" style={{ paddingTop: "1.25rem" }}>
               <div style={{
                 display: "grid",
                 gridTemplateColumns: "1fr 1fr",
@@ -221,7 +351,7 @@ export default function ViolationsPage() {
                   ["Type",       <ViolationBadge type={selectedViolation.violation_type} />],
                   ["Time",       new Date(selectedViolation.timestamp).toLocaleString()],
                   ["Confidence", <ConfidenceCell value={selectedViolation.confidence} />],
-                  ["Person",     selectedViolation.person_name || "Unknown"],
+                  ["Person",     selectedViolation.person_name || `Track #${selectedViolation.track_id || 1}`],
                   ["Status",     <span className={`badge badge-${selectedViolation.is_reviewed ? "success" : "warning"}`}>
                     {selectedViolation.is_reviewed ? "Reviewed" : "Pending"}
                   </span>],
