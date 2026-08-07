@@ -99,10 +99,13 @@ class VideoStream:
             if (self.cap is None or not getattr(self.cap, "isOpened", lambda: False)()) and os.name == "nt":
                 self.cap = cv2.VideoCapture(int(self.source), cv2.CAP_DSHOW)
         else:
-            if str(self.source).startswith("rtsp://"):
-                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+            s_str = str(self.source)
+            if s_str.startswith("rtsp://"):
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;5000000"
+            elif s_str.startswith("udp://"):
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "fifo_size;5000000|overrun_nonfatal;1"
             try:
-                self.cap = cv2.VideoCapture(str(self.source), self.backend)
+                self.cap = cv2.VideoCapture(s_str, self.backend)
             except Exception:
                 self.cap = None
 
